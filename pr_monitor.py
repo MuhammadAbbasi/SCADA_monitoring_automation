@@ -29,14 +29,14 @@ def extract_pr_data(page):
 
     pr_results = []
     for row in rows:
-        columns = row.locator('td').all()
-        if len(columns) >= 2:
-            inv_name = columns[0].inner_text().strip()
+        col_texts = row.locator('td').all_inner_texts()
+        if len(col_texts) >= 2:
+            inv_name = col_texts[0].strip()
             
             if "SunGrow SG350HX" in inv_name:
                 continue
                 
-            pr_val_str = columns[1].inner_text().strip()
+            pr_val_str = col_texts[1].strip()
             
             # Format PR value to float for Excel
             try:

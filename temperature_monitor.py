@@ -69,10 +69,8 @@ def extract_temperature_data(page):
     results = []
 
     for idx, row in enumerate(rows):
-        columns = row.locator('td').all()
-        
         # Extract text and ignore columns marked as SunGrow
-        col_texts_raw = [c.inner_text().strip() for c in columns]
+        col_texts_raw = [text.strip() for text in row.locator('td').all_inner_texts()]
         col_texts = [v for i, v in enumerate(col_texts_raw) if i not in ignored_indices]
         
         # Trim data columns to match header length if there are extra empty columns
