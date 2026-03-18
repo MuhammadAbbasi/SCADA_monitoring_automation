@@ -20,12 +20,11 @@ def extract_temperature_data(page):
             
             # Dismiss "Valori minimi non disponibili" modal if it appears
             try:
-                # Wait up to 5 seconds for a visible "Chiudi" element
-                chiudi_btn = page.locator('text="Chiudi"')
-                chiudi_btn.first.wait_for(state="visible", timeout=5000)
+                # Wait up to 8 seconds for a visible "Chiudi" button
+                page.wait_for_selector('button:has-text("Chiudi"):visible', timeout=8000)
                 print("Dismissing 'Valori minimi non disponibili' modal...")
-                chiudi_btn.first.click()
-                time.sleep(1) # short wait for modal to disappear
+                page.locator('button:has-text("Chiudi"):visible').first.click()
+                time.sleep(2) # wait for modal to disappear
             except:
                 pass
                 
