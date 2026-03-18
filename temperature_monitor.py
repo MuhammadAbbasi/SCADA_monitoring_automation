@@ -17,6 +17,18 @@ def extract_temperature_data(page):
         if 'active' not in acceso_btn.get_attribute('class'):
             print("Toggling 'Valori in minuti' to ACCESO...")
             acceso_btn.click()
+            
+            # Dismiss "Valori minimi non disponibili" modal if it appears
+            try:
+                # Wait up to 5 seconds for a visible "Chiudi" element
+                chiudi_btn = page.locator('text="Chiudi"')
+                chiudi_btn.first.wait_for(state="visible", timeout=5000)
+                print("Dismissing 'Valori minimi non disponibili' modal...")
+                chiudi_btn.first.click()
+                time.sleep(1) # short wait for modal to disappear
+            except:
+                pass
+                
             time.sleep(3)
         else:
             print("'Valori in minuti' is already ACCESO.")
