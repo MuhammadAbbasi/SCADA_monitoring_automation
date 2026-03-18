@@ -11,8 +11,13 @@ from temperature_monitor import extract_temperature_data
 
 import json
 
-# Read configuration from config.json
-config_path = r"\\s01\get\2025.01 Mazara 01 A2A\03 - REPORT\Report\09 Testing\Automation\config.json"
+# Paths relative to this script's location
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_SCRIPT_DIR)           # Automation/
+_EXTRACTED_DATA_DIR = os.path.join(_ROOT_DIR, "extracted_data")
+
+# Read configuration from config.json at root
+config_path = os.path.join(_ROOT_DIR, "config.json")
 with open(config_path, "r") as f:
     config_data = json.load(f)
 
@@ -62,34 +67,36 @@ def append_df_to_excel(filename, df, sheet_name='Sheet1'):
         with pd.ExcelWriter(filename, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
             # Check if sheet exists to decide whether to write header
             write_header = sheet_name not in writer.sheets
-            
+
             # Find the last row in the existing sheet
             startrow = writer.sheets[sheet_name].max_row if not write_header else 0
-            
+
             df.to_excel(writer, sheet_name=sheet_name, startrow=startrow, index=False, header=write_header)
 
 
 def export_to_excel(df_pr, df_ac, df_insulation, df_temp):
-    """Append DataFrames to separate Excel files."""
+    """Append DataFrames to separate Excel files in the extracted_data folder."""
     today_str = datetime.now().strftime("%Y-%m-%d")
     current_time = datetime.now().strftime("%H:%M:%S")
-    export_dir = r"\\s01\get\2025.01 Mazara 01 A2A\03 - REPORT\Report\09 Testing\Automation"
-    
+
+    # Ensure output directory exists
+    os.makedirs(_EXTRACTED_DATA_DIR, exist_ok=True)
+
     # Define separate filenames
-    file_pr = f"{export_dir}\\PR_{today_str}.xlsx"
-    file_ac = f"{export_dir}\\Potenza_AC_{today_str}.xlsx"
-    file_insulation = f"{export_dir}\\Resistenza_Isolamento_{today_str}.xlsx"
-    file_temp = f"{export_dir}\\Temperatura_{today_str}.xlsx"
+    file_pr = os.path.join(_EXTRACTED_DATA_DIR, f"PR_{today_str}.xlsx")
+    file_ac = os.path.join(_EXTRACTED_DATA_DIR, f"Potenza_AC_{today_str}.xlsx")
+    file_insulation = os.path.join(_EXTRACTED_DATA_DIR, f"Resistenza_Isolamento_{today_str}.xlsx")
+    file_temp = os.path.join(_EXTRACTED_DATA_DIR, f"Temperatura_{today_str}.xlsx")
 
     print(f"\n[{current_time}] Esportazione/Accodamento dei dati in corso...")
-    
+
     try:
         # Append PR Data
         if not df_pr.empty:
             df_pr.insert(0, 'Timestamp Fetch', current_time)
             append_df_to_excel(file_pr, df_pr)
             print(f"[OK] Accodato: {file_pr}")
-        
+
         # Append AC Data
         if not df_ac.empty:
             df_ac.insert(0, 'Timestamp Fetch', current_time)
@@ -107,9 +114,9 @@ def export_to_excel(df_pr, df_ac, df_insulation, df_temp):
             df_temp.insert(0, 'Timestamp Fetch', current_time)
             append_df_to_excel(file_temp, df_temp)
             print(f"[OK] Accodato: {file_temp}")
-        
+
         print(f"[FINISH] Tutti i file ({sum([not df.empty for df in [df_pr, df_ac, df_insulation, df_temp]])}) sono stati aggiornati con successo.")
-        
+
     except Exception as e:
         print(f"[ERROR] Failed to export/append files: {e}")
 
@@ -134,7 +141,7 @@ def run_extraction_cycle(page):
 
         # --- Export ---
         export_to_excel(df_pr, df_ac, df_insulation, df_temp)
-        
+
     except Exception as e:
         print(f"\n[ERROR] An error occurred during extraction cycle: {e}")
         page.screenshot(path="error_screenshot.png")
@@ -143,7 +150,7 @@ def run_extraction_cycle(page):
 
 def main():
     extraction_interval_minutes = 10
-    
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context(viewport={'width': 1280, 'height': 800})
@@ -163,16 +170,16 @@ def main():
             cycle_count = 1
             while True:
                 print(f"\n=== Avvio Ciclo di Estrazione #{cycle_count} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===")
-                
+
                 # Make sure we're on the dashboard
                 try:
                     page.locator('text="Valutazione"').first.click()
                     time.sleep(2)
                 except:
                     pass
-                
+
                 run_extraction_cycle(page)
-                
+
                 print(f"\nCiclo completato. Attesa di {extraction_interval_minutes} minuti per il prossimo ciclo...")
                 time.sleep(extraction_interval_minutes * 60)
                 cycle_count += 1

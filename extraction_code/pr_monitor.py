@@ -32,20 +32,20 @@ def extract_pr_data(page):
         col_texts = row.locator('td').all_inner_texts()
         if len(col_texts) >= 2:
             inv_name = col_texts[0].strip()
-            
+
             if "SunGrow SG350HX" in inv_name:
                 continue
-                
+
             pr_val_str = col_texts[1].strip()
-            
+
             # Format PR value to float for Excel
             try:
                 pr_val = float(pr_val_str.replace(',', '.'))
             except ValueError:
                 pr_val = pr_val_str
-                
+
             pr_results.append({'Inverter': inv_name, 'PR': pr_val})
             print(f"  {inv_name}: PR {pr_val_str}%")
-            
+
     df_pr = pd.DataFrame(pr_results)
     return df_pr
