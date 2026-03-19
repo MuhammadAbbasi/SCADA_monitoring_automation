@@ -179,8 +179,7 @@ def main():
                     pass
 
                 run_extraction_cycle(page)
-
-                print(f"\nCiclo completato. Attesa di {extraction_interval_minutes} minuti per il prossimo ciclo...")
+                print(f"\nCiclo #{cycle_count} completato. Attesa di {extraction_interval_minutes} minuti per il prossimo ciclo...")
                 time.sleep(extraction_interval_minutes * 60)
                 cycle_count += 1
 
