@@ -1,3 +1,6 @@
 pandas
-playwright
+numpy
+matplotlib
 openpyxl
+watchdog    
+streamlit  
