@@ -56,7 +56,7 @@ def login(page):
         print("Successfully logged in and reached the Evaluation dashboard.")
     except Exception as e:
         print(f"Failed to reach dashboard or timeout: {e}")
-        page.screenshot(path="login_error.png")
+        page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "login_error.png"))
 
 
 def append_df_to_excel(filename, df, sheet_name='Sheet1'):
@@ -161,12 +161,15 @@ def run_extraction_cycle(page):
 
     except Exception as e:
         print(f"\n[ERROR] An error occurred during extraction cycle: {e}")
-        page.screenshot(path="error_screenshot.png")
-        print("Saved error_screenshot.png for debugging.")
+        page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "error_screenshot.png"))
+        print("Saved errors/error_screenshot.png for debugging.")
 
 
 def main():
     extraction_interval_minutes = 10
+
+    # Ensure errors folder exists
+    os.makedirs(os.path.join(_ROOT_DIR, "errors"), exist_ok=True)
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -204,7 +207,7 @@ def main():
             print("\n[INFO] Script interrotto dall'utente. Uscita in corso...")
         except Exception as e:
             print(f"\n[FATAL ERROR] {e}")
-            page.screenshot(path="fatal_error_screenshot.png")
+            page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "fatal_error_screenshot.png"))
         finally:
             print("\nClosing browser...")
             browser.close()
