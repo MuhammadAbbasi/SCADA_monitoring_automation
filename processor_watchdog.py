@@ -23,14 +23,26 @@ def clean_italian_localization(df):
 def analyze_inverter_data(directory):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Local Analysis...")
     date_str = datetime.now().strftime("%Y-%m-%d")
-    
-    # We now include Corrente_DC to verify additional metrics
+
+    # Retain historical alarm trail across analyses
+    dashboard_path = os.path.join(directory, 'dashboard_data.json')
+    historical_alarms = []
+    try:
+        if os.path.exists(dashboard_path):
+            with open(dashboard_path, 'r') as f:
+                existing = json.load(f)
+                historical_alarms = existing.get('historical_alarms', []) or []
+    except Exception as e:
+        print(f"[Warning] Could not read existing dashboard JSON for history: {e}")
+
+    # We now include Corrente_DC and Irraggiamento to verify additional metrics
     file_patterns = {
         'Potenza_AC': f"*Potenza_AC_*.xlsx",
         'PR': f"*PR_*.xlsx",
         'Resistenza_Isolamento': f"*Resistenza_Isolamento_*.xlsx",
         'Temperatura': f"*Temperatura_*.xlsx",
-        'Corrente_DC': f"*Corrente_DC_*.xlsx"
+        'Corrente_DC': f"*Corrente_DC_*.xlsx",
+        'Irraggiamento': f"*Irraggiamento_*.xlsx"
     }
 
     file_paths = {}
@@ -39,7 +51,8 @@ def analyze_inverter_data(directory):
         if matches:
             file_paths[key] = max(matches, key=os.path.getctime) # Get newest file
 
-    if len(file_paths) < 5:
+    # Require all 6 data types now (including Irraggiamento)
+    if len(file_paths) < 6:
         print("[Error] Missing required files. Waiting for next extraction...")
         return
 
@@ -49,6 +62,7 @@ def analyze_inverter_data(directory):
     temp_df = clean_italian_localization(pd.read_excel(file_paths['Temperatura']))
     pr_df = clean_italian_localization(pd.read_excel(file_paths['PR']))
     corrente_df = clean_italian_localization(pd.read_excel(file_paths['Corrente_DC']))
+    irr_df = clean_italian_localization(pd.read_excel(file_paths['Irraggiamento']))
 
     # Standardize Time
     for df in [pot_df, res_df, temp_df]:
@@ -88,7 +102,8 @@ def analyze_inverter_data(directory):
             "tripped": 0,
             "comms_lost": 0
         },
-        "anomalies": []
+        "anomalies": [],
+        "historical_alarms": historical_alarms
     }
 
     for inv in inv_ids:
@@ -101,10 +116,15 @@ def analyze_inverter_data(directory):
         if pot.isnull().sum() > 5:
             dashboard_data["macro_health"]["comms_lost"] += 1
             dashboard_data["macro_health"]["online"] -= 1
-            dashboard_data["anomalies"].append({
-                "inverter": inv, "type": "Comms Loss", "severity": "Medium",
+            alarm = {
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "inverter": inv,
+                "type": "Comms Loss",
+                "severity": "Medium",
                 "details": "Missing data during daylight hours."
-            })
+            }
+            dashboard_data["anomalies"].append(alarm)
+            dashboard_data["historical_alarms"].append(alarm)
             continue
 
         # 2. Trip Analysis (0W while site is producing)
@@ -125,17 +145,32 @@ def analyze_inverter_data(directory):
             if min_res != "N/A" and min_res < 50: reason = f"Insulation Fault ({min_res} kOhm)"
             elif max_temp != "N/A" and max_temp > 60: reason = f"Thermal Trip ({max_temp} °C)"
             
-            dashboard_data["anomalies"].append({
-                "inverter": inv, "type": "0W Trip", "severity": "Critical", "time": str(t_time),
+            alarm = {
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "inverter": inv,
+                "type": "0W Trip",
+                "severity": "Critical",
+                "time": str(t_time),
                 "details": reason
-            })
+            }
+            dashboard_data["anomalies"].append(alarm)
+            dashboard_data["historical_alarms"].append(alarm)
 
         # 3. Thermal Derating
         elif (temp.max() > 60) and (pot.mean() < site_avg.mean() * 0.9):
-            dashboard_data["anomalies"].append({
-                "inverter": inv, "type": "Thermal Derating", "severity": "High",
+            alarm = {
+                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "inverter": inv,
+                "type": "Thermal Derating",
+                "severity": "High",
                 "details": f"High Temp ({temp.max()}°C) causing power throttling."
-            })
+            }
+            dashboard_data["anomalies"].append(alarm)
+            dashboard_data["historical_alarms"].append(alarm)
+
+    # Cap the stored history to prevent unbounded growth
+    history_limit = 200
+    dashboard_data["historical_alarms"] = dashboard_data["historical_alarms"][-history_limit:]
 
     # Save structured JSON for the frontend
     output_path = os.path.join(directory, 'dashboard_data.json')
@@ -149,7 +184,7 @@ def analyze_inverter_data(directory):
 class VCOMFileHandler(FileSystemEventHandler):
     def __init__(self, directory):
         self.directory = directory
-        self.target_keywords = ['Potenza_AC', 'PR', 'Resistenza_Isolamento', 'Temperatura', 'Corrente_DC']
+        self.target_keywords = ['Potenza_AC', 'PR', 'Resistenza_Isolamento', 'Temperatura', 'Corrente_DC', 'Irraggiamento']
         self.last_analysis_time = 0
         
     def wait_for_file_stability(self, filepath, timeout=30):
@@ -239,7 +274,7 @@ if __name__ == "__main__":
     os.makedirs(target_dir, exist_ok=True)
     
     print(f"Starting Watchdog... monitoring folder: {target_dir}")
-    print("Waiting for all 5 data files: Potenza_AC, PR, Resistenza_Isolamento, Temperatura, Corrente_DC")
+    print("Waiting for all 6 data files: Potenza_AC, PR, Resistenza_Isolamento, Temperatura, Corrente_DC, Irraggiamento")
     event_handler = VCOMFileHandler(target_dir)
     observer = Observer()
     observer.schedule(event_handler, target_dir, recursive=False)

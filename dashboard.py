@@ -105,6 +105,21 @@ st.markdown("""
 *To display line charts, point `st.line_chart()` or `plotly` to the processed DataFrames saved in the `./extracted_data/` folder.*
 """)
 
+# --- 3. HISTORICAL ALARMS ---
+st.header("3. Historical Alarm Trail")
+
+historical_alarms = data.get('historical_alarms', [])
+if not historical_alarms:
+    st.info("No historical alarms recorded yet.")
+else:
+    for alarm in list(reversed(historical_alarms[-50:])):
+        timestamp = alarm.get('timestamp', 'N/A')
+        inv = alarm.get('inverter', 'Unknown')
+        atype = alarm.get('type', 'Unknown')
+        severity = alarm.get('severity', 'Info')
+        details = alarm.get('details', '')
+        st.write(f"**[{timestamp}] {severity}** — {inv} — {atype} — {details}")
+
 # JavaScript for AJAX polling
 js_code = """
 <script>

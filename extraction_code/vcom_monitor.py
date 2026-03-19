@@ -9,6 +9,7 @@ from potenza_ac_monitor import extract_potenza_ac_data
 from insulation_resistance_monitor import extract_insulation_resistance_data
 from temperature_monitor import extract_temperature_data
 from corrente_dc_monitor import extract_corrente_dc_data
+from irradiance_monitor import extract_irradiance_data
 
 
 import json
@@ -76,7 +77,7 @@ def append_df_to_excel(filename, df, sheet_name='Sheet1'):
             df.to_excel(writer, sheet_name=sheet_name, startrow=startrow, index=False, header=write_header)
 
 
-def export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc):
+def export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc, df_irradiance):
 
     """Append DataFrames to separate Excel files in the extracted_data folder."""
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -91,6 +92,7 @@ def export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc):
     file_insulation = os.path.join(_EXTRACTED_DATA_DIR, f"Resistenza_Isolamento_{today_str}.xlsx")
     file_temp = os.path.join(_EXTRACTED_DATA_DIR, f"Temperatura_{today_str}.xlsx")
     file_dc = os.path.join(_EXTRACTED_DATA_DIR, f"Corrente_DC_{today_str}.xlsx")
+    file_irradiance = os.path.join(_EXTRACTED_DATA_DIR, f"Irraggiamento_{today_str}.xlsx")
 
 
     print(f"\n[{current_time}] Esportazione/Accodamento dei dati in corso...")
@@ -126,6 +128,12 @@ def export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc):
             append_df_to_excel(file_dc, df_dc)
             print(f"[OK] Accodato: {file_dc}")
 
+        # Append Irraggiamento Data
+        if not df_irradiance.empty:
+            df_irradiance.insert(0, 'Timestamp Fetch', current_time)
+            append_df_to_excel(file_irradiance, df_irradiance)
+            print(f"[OK] Accodato: {file_irradiance}")
+
         print(f"[FINISH] Tutti i file ({sum([not df.empty for df in [df_pr, df_ac, df_insulation, df_temp, df_dc]])}) sono stati aggiornati con successo.")
 
 
@@ -154,10 +162,13 @@ def run_extraction_cycle(page):
 
         # --- Corrente DC ---
         df_dc = extract_corrente_dc_data(page)
+        time.sleep(2)
+
+        # --- Irraggiamento ---
+        df_irradiance = extract_irradiance_data(page)
 
         # --- Export ---
-        export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc)
-
+        export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc, df_irradiance)
 
     except Exception as e:
         print(f"\n[ERROR] An error occurred during extraction cycle: {e}")
