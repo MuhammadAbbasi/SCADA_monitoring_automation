@@ -199,7 +199,7 @@ def main():
                     pass
 
                 run_extraction_cycle(page)
-                print(f"\nCiclo #{cycle_count} completato. Attesa di {extraction_interval_minutes} minuti per il prossimo ciclo...")
+                print(f"\nCycle #{cycle_count} completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Waiting for {extraction_interval_minutes} minutes before the next cycle...")
                 time.sleep(extraction_interval_minutes * 60)
                 cycle_count += 1
 
