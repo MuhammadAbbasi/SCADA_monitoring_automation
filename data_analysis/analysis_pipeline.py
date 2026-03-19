@@ -23,14 +23,16 @@ def clean_italian_localization(df):
 def analyze_inverter_data(directory):
     print(f"\n--- Initializing Analysis for {directory} ---")
     
-    # Identify files for the latest date (today 2026-03-18)
-    date_str = "2026-03-18" 
+    # Identify files for the latest date (defaults to today)
+    date_str = datetime.now().strftime("%Y-%m-%d")
     file_patterns = {
         'Potenza_AC': f"*Potenza_AC_{date_str}*.xlsx",
         'PR': f"*PR_{date_str}*.xlsx",
         'Resistenza_Isolamento': f"*Resistenza_Isolamento_{date_str}*.xlsx",
-        'Temperatura': f"*Temperatura_{date_str}*.xlsx"
+        'Temperatura': f"*Temperatura_{date_str}*.xlsx",
+        'Corrente_DC': f"*Corrente_DC_{date_str}*.xlsx"
     }
+
     
     file_paths = {}
     for key, pattern in file_patterns.items():
@@ -40,9 +42,10 @@ def analyze_inverter_data(directory):
             continue
         file_paths[key] = matches[0]
 
-    if len(file_paths) < 4:
+    if len(file_paths) < 5:
         print("[Error] Missing required files for analysis.")
         return
+
 
     # Load and Clean
     print("Loading datasets...")
@@ -50,21 +53,33 @@ def analyze_inverter_data(directory):
     res_df = clean_italian_localization(pd.read_excel(file_paths['Resistenza_Isolamento']))
     temp_df = clean_italian_localization(pd.read_excel(file_paths['Temperatura']))
     pr_df = clean_italian_localization(pd.read_excel(file_paths['PR']))
+    dc_df = clean_italian_localization(pd.read_excel(file_paths['Corrente_DC']))
+
 
     # Standardize 'Ora' to string HH:MM if it's datetime
-    for df in [pot_df, res_df, temp_df]:
+    for df in [pot_df, res_df, temp_df, dc_df]:
+
         if pd.api.types.is_datetime64_any_dtype(df['Ora']):
             df['Ora'] = df['Ora'].dt.strftime('%H:%M')
 
     # Merge on 'Ora'
     merged_ts = pot_df.merge(res_df, on='Ora', suffixes=('_POT', '_RES'))
     merged_ts = merged_ts.merge(temp_df, on='Ora', suffixes=('', '_TEMP'))
+    merged_ts = merged_ts.merge(dc_df, on='Ora', suffixes=('', '_DC'))
+
     
     # Rename Temperatura columns if they don't have suffix
     temp_cols = [c for c in temp_df.columns if 'INV' in c and c != 'Ora']
     for c in temp_cols:
         if c in merged_ts.columns and c + '_TEMP' not in merged_ts.columns:
             merged_ts = merged_ts.rename(columns={c: c + '_TEMP'})
+
+    # Rename Corrente DC columns if they don't have suffix
+    dc_cols = [c for c in dc_df.columns if 'INV' in c and c != 'Ora']
+    for c in dc_cols:
+        if c in merged_ts.columns and c + '_DC' not in merged_ts.columns:
+            merged_ts = merged_ts.rename(columns={c: c + '_DC'})
+
 
     inv_ids = [c.replace('_POT', '') for c in merged_ts.columns if '_POT' in c]
     
