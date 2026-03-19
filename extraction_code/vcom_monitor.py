@@ -173,7 +173,7 @@ def main():
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        context = browser.new_context(viewport={'width': 1280, 'height': 800})
+        context = browser.new_context(viewport={'width': 1450, 'height': 900})
         page = context.new_page()
 
         try:

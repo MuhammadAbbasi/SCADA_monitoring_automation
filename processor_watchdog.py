@@ -150,8 +150,7 @@ class VCOMFileHandler(FileSystemEventHandler):
     def __init__(self, directory):
         self.directory = directory
         self.target_keywords = ['Potenza_AC', 'PR', 'Resistenza_Isolamento', 'Temperatura', 'Corrente_DC']
-        self.found_files = set()
-        self.last_trigger_date = ""
+        self.last_analysis_time = 0
         
     def wait_for_file_stability(self, filepath, timeout=30):
         """ Waits for file size to stop changing, ensuring write is complete. """
@@ -174,44 +173,50 @@ class VCOMFileHandler(FileSystemEventHandler):
         print(f"[Watchdog] Timeout waiting for file stability: {filepath}")
         return False
         
+    def get_latest_dataset_mod_time(self):
+        """Return max modification time (epoch) across all required sheets.
+
+        Returns 0 if not all required files are present.
+        """
+        max_mod = 0
+        for kw in self.target_keywords:
+            matches = glob.glob(os.path.join(self.directory, f"*{kw}_*.xlsx"))
+            if not matches:
+                return 0
+            latest_file = max(matches, key=os.path.getmtime)
+            max_mod = max(max_mod, os.path.getmtime(latest_file))
+        return max_mod
+
     def handle_event(self, event):
         # Ignore directory changes
         if event.is_directory:
             return
 
-        # Check if the file is XLSX
+        # We only care about .xlsx files
         if not event.src_path.endswith('.xlsx'):
             return
-        
-        filename = os.path.basename(event.src_path)
-        
-        # Identify which target keyword this file matches
-        matched_keyword = None
-        for kw in self.target_keywords:
-            if kw in filename:
-                matched_keyword = kw
-                break
-        
-        if matched_keyword:
-            print(f"[Watchdog] Detected relevant file: {filename}")
-            if self.wait_for_file_stability(event.src_path):
-                self.found_files.add(matched_keyword)
-                print(f"[Watchdog] File ready: {matched_keyword} (Current set: {self.found_files})")
-                
-                # If all 5 keywords are found, trigger analysis
-                if len(self.found_files) >= 5:
-                    today = datetime.now().strftime('%Y-%m-%d')
-                    if self.last_trigger_date != today:
-                        print(f"\n[Watchdog] SUCCESS: All 5 data sets acquired for {today}. Triggering Forensic Analysis...")
 
-                        try:
-                            analyze_inverter_data(self.directory)
-                            self.last_trigger_date = today
-                            self.found_files.clear() # Reset for next batch/day
-                        except Exception as e:
-                            print(f"[Watchdog] Error during analysis: {e}")
-                    else:
-                        print("[Watchdog] Analysis already performed for today.")
+        filename = os.path.basename(event.src_path)
+        print(f"[Watchdog] Detected file event: {filename}")
+
+        # Wait for the file to finish writing
+        if not self.wait_for_file_stability(event.src_path):
+            return
+
+        latest_mod = self.get_latest_dataset_mod_time()
+        if latest_mod == 0:
+            print("[Watchdog] Waiting for all required data files to be present...")
+            return
+
+        if latest_mod > self.last_analysis_time:
+            print(f"[Watchdog] New data detected (mod_time={latest_mod}). Running analysis...")
+            try:
+                analyze_inverter_data(self.directory)
+                self.last_analysis_time = latest_mod
+            except Exception as e:
+                print(f"[Watchdog] Error during analysis: {e}")
+        else:
+            print("[Watchdog] No new data since last analysis.")
 
     # Listen for when a file is modified/updated
     def on_modified(self, event):
@@ -241,8 +246,21 @@ if __name__ == "__main__":
     observer.start()
     
     try:
+        # Periodic safety check: ensure analysis reruns at least every 10 minutes if files update
+        next_check = time.time() + 600  # 10 minutes
         while True:
             time.sleep(1)
+
+            if time.time() >= next_check:
+                next_check = time.time() + 600
+                latest_mod = event_handler.get_latest_dataset_mod_time()
+                if latest_mod > event_handler.last_analysis_time:
+                    print("[Watchdog] Periodic check: new data detected, running analysis...")
+                    try:
+                        analyze_inverter_data(target_dir)
+                        event_handler.last_analysis_time = latest_mod
+                    except Exception as e:
+                        print(f"[Watchdog] Error during periodic analysis: {e}")
     except KeyboardInterrupt:
         observer.stop()
     observer.join()
