@@ -1,10 +1,11 @@
 {
-    "last_updated": "2026-03-19 16:43:39",
+    "last_updated": "2026-03-20 16:47:52",
     "macro_health": {
         "total_inverters": 0,
         "online": 0,
         "tripped": 0,
         "comms_lost": 0
     },
-    "anomalies": []
+    "anomalies": [],
+    "historical_alarms": []
 }
