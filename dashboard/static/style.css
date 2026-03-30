@@ -153,17 +153,18 @@ td { padding: 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-siz
     margin-left: 0.5rem;
 }
 .file-indicator.success { background-color: var(--success-color); box-shadow: 0 0 8px var(--success-color); }
-.file-indicator.pending { background-color: var(--warning-color); box-shadow: 0 0 8px var(--warning-color); position: relative; }
-.file-indicator.pending::after {
-    content: 'Awaiting';
-    position: absolute;
-    right: 1.5rem;
-    top: -4px;
-    font-size: 0.65rem;
+.file-indicator.pending { background-color: var(--warning-color); box-shadow: 0 0 8px var(--warning-color); animation: none; }
+.card-pending { border-color: var(--warning-color) !important; }
+.file-status-text {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    margin-left: 0.5rem;
+}
+.card-pending .file-status-text {
     color: var(--warning-color);
-    white-space: nowrap;
+    font-weight: 600;
     text-transform: uppercase;
-    font-weight: 800;
+    letter-spacing: 0.03em;
 }
 .loading {
     border: 2px solid rgba(255, 255, 255, 0.1);
@@ -171,3 +172,78 @@ td { padding: 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-siz
     animation: spin 1s linear infinite;
 }
 @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+/* ── Inverter Health Matrix ─────────────────────────────────────────────── */
+.health-matrix-section { margin-bottom: 2rem; }
+
+.health-matrix-legend {
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.legend-labels { color: var(--text-secondary); font-size: 0.72rem; margin-left: auto; }
+
+.inverter-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 0.6rem;
+}
+
+/* Individual inverter card */
+.inv-card {
+    background: var(--card-bg);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0.45rem;
+    padding: 0.55rem 0.65rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    transition: border-color 0.2s;
+}
+.inv-name {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+}
+.inv-leds {
+    display: flex;
+    gap: 0.3rem;
+    align-items: center;
+}
+/* Overall status dot — slightly larger, sits below the 4 LEDs */
+.inv-overall {
+    width: 8px;
+    height: 8px;
+    margin-top: 0.1rem;
+    opacity: 0.85;
+}
+
+/* Overall border tint per status */
+.overall-border-green  { border-color: rgba(16, 185, 129, 0.35); }
+.overall-border-yellow { border-color: rgba(245, 158, 11, 0.45); }
+.overall-border-red    { border-color: rgba(239, 68, 68, 0.5);   }
+.overall-border-grey   { border-color: rgba(255, 255, 255, 0.06); }
+
+/* ── LED dot (shared by health matrix and legend) ───────────────────────── */
+.led-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.led-dot.green  { background: var(--success-color); box-shadow: 0 0 5px var(--success-color); }
+.led-dot.yellow { background: var(--warning-color); box-shadow: 0 0 5px var(--warning-color); }
+.led-dot.red    { background: var(--danger-color);  box-shadow: 0 0 5px var(--danger-color);  }
+.led-dot.grey   { background: #4b5563; box-shadow: none; }

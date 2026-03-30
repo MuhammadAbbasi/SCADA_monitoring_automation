@@ -43,27 +43,47 @@
                 <div class="file-card" id="file-Potenza_AC">
                     <span class="file-label">Potenza AC</span>
                     <span class="file-indicator loading"></span>
+                    <span class="file-status-text"></span>
                 </div>
                 <div class="file-card" id="file-PR">
                     <span class="file-label">PR</span>
                     <span class="file-indicator loading"></span>
+                    <span class="file-status-text"></span>
                 </div>
                 <div class="file-card" id="file-Resistenza_Isolamento">
                     <span class="file-label">Insulation</span>
                     <span class="file-indicator loading"></span>
+                    <span class="file-status-text"></span>
                 </div>
                 <div class="file-card" id="file-Temperatura">
                     <span class="file-label">Temperature</span>
                     <span class="file-indicator loading"></span>
+                    <span class="file-status-text"></span>
                 </div>
                 <div class="file-card" id="file-Corrente_DC">
                     <span class="file-label">Corrente DC</span>
                     <span class="file-indicator loading"></span>
+                    <span class="file-status-text"></span>
                 </div>
                 <div class="file-card" id="file-Irraggiamento">
                     <span class="file-label">Irraggiamento</span>
                     <span class="file-indicator loading"></span>
+                    <span class="file-status-text"></span>
                 </div>
+            </div>
+        </section>
+
+        <section class="health-matrix-section">
+            <h2>Inverter Health Matrix</h2>
+            <div class="health-matrix-legend">
+                <span class="legend-item"><span class="led-dot green"></span> OK</span>
+                <span class="legend-item"><span class="led-dot yellow"></span> Warning</span>
+                <span class="legend-item"><span class="led-dot red"></span> Alert</span>
+                <span class="legend-item"><span class="led-dot grey"></span> No Data</span>
+                <span class="legend-item legend-labels">PR &nbsp;·&nbsp; Temp &nbsp;·&nbsp; DC &nbsp;·&nbsp; AC</span>
+            </div>
+            <div id="inverter-health-grid" class="inverter-grid">
+                <p class="placeholder-text">Waiting for data updates...</p>
             </div>
         </section>
 

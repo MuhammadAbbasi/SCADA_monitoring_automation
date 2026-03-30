@@ -23,11 +23,43 @@ async function updateDashboard() {
         if (data.file_statuses) {
             Object.entries(data.file_statuses).forEach(([fileKey, statusObj]) => {
                 const card = document.getElementById(`file-${fileKey}`);
-                if (card) {
-                    const indicator = card.querySelector('.file-indicator');
-                    indicator.className = `file-indicator ${statusObj.status}`;
+                if (!card) return;
+                const indicator = card.querySelector('.file-indicator');
+                const statusText = card.querySelector('.file-status-text');
+                indicator.className = `file-indicator ${statusObj.status}`;
+                if (statusObj.status === 'success') {
+                    card.classList.remove('card-pending');
+                    if (statusText) statusText.textContent = statusObj.timestamp || '';
+                } else {
+                    card.classList.add('card-pending');
+                    if (statusText) statusText.textContent = 'Awaiting Data';
                 }
             });
+        }
+
+        // Update Inverter Health Matrix
+        const healthGrid = document.getElementById('inverter-health-grid');
+        if (data.inverter_health && Object.keys(data.inverter_health).length > 0) {
+            const FLAG_KEYS   = ['pr', 'temp', 'dc_current', 'ac_power'];
+            const FLAG_LABELS = ['PR', 'Temp', 'DC', 'AC'];
+
+            healthGrid.innerHTML = Object.entries(data.inverter_health).map(([inv, flags]) => {
+                // Shorten "INV TX1-01" → "TX1-01" for compact display
+                const shortName = inv.replace('INV ', '');
+                const leds = FLAG_KEYS.map((key, i) => {
+                    const color = flags[key] || 'grey';
+                    return `<span class="led-dot ${color}" title="${FLAG_LABELS[i]}: ${color.toUpperCase()}"></span>`;
+                }).join('');
+                const overall = flags.overall_status || 'grey';
+                return `
+                    <div class="inv-card overall-border-${overall}" title="${inv}">
+                        <span class="inv-name">${shortName}</span>
+                        <div class="inv-leds">${leds}</div>
+                        <span class="inv-overall led-dot ${overall}"></span>
+                    </div>`;
+            }).join('');
+        } else if (healthGrid) {
+            healthGrid.innerHTML = '<p class="placeholder-text">Waiting for data updates...</p>';
         }
 
         // Update Active Alerts (from current timestamp)

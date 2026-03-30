@@ -51,6 +51,123 @@ def to_hours(t):
     except Exception:
         return np.nan
 
+def cleanup_old_daily_jsons(directory, days=7):
+    """Delete daily dashboard JSON snapshots older than `days` days to prevent unbounded growth."""
+    today = datetime.now().date()
+    for f in glob.glob(os.path.join(directory, "dashboard_data_????-??-??.json")):
+        basename = os.path.basename(f)
+        date_str = basename.replace("dashboard_data_", "").replace(".json", "")
+        try:
+            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if (today - file_date).days > days:
+                os.remove(f)
+                logger.info(f"Cleaned up old daily JSON (>{days}d): {f}")
+        except ValueError:
+            pass
+
+def compute_health_flags(merged, inv_ids):
+    """
+    Evaluate four health conditions for every inverter using the latest row of
+    the merged DataFrame and return a per-inverter colour-coded status dict.
+
+    Flags returned per inverter
+    ---------------------------
+    pr          : "green" | "yellow" | "red" | "grey"  (grey = no data)
+    temp        : "green" | "yellow" | "red" | "grey"
+    dc_current  : "green" | "red"   | "grey"           (relative to site median)
+    ac_power    : "green" | "red"   | "grey"           (relative to site median)
+    overall_status: worst non-grey flag across all four; "grey" if all grey
+
+    Night-time / zero-median guard
+    -------------------------------
+    If the site AC or DC median is 0 or NaN (plant off at night), the relative
+    checks are skipped and return "grey" instead of false reds.
+    """
+    if merged.empty or not inv_ids:
+        return {}
+
+    latest = merged.iloc[-1]
+
+    # ── Site-wide medians (used for relative checks) ──────────────────────────
+    # AC Power: one column per inverter, named directly as the inverter ID
+    ac_series = pd.to_numeric(
+        pd.Series([latest.get(inv, np.nan) for inv in inv_ids]), errors='coerce'
+    )
+    site_ac_median = float(ac_series.median()) if ac_series.notna().any() else np.nan
+
+    # DC Current: mean across all string columns per inverter → site median of those means
+    inv_dc_means = {}
+    for inv in inv_ids:
+        dc_cols = [c for c in merged.columns if inv in c and '_DC' in c]
+        if dc_cols:
+            inv_dc_means[inv] = float(
+                pd.to_numeric(latest[dc_cols], errors='coerce').mean()
+            )
+        else:
+            inv_dc_means[inv] = np.nan
+    dc_mean_series = pd.Series(list(inv_dc_means.values()), dtype=float)
+    site_dc_median = float(dc_mean_series.median()) if dc_mean_series.notna().any() else np.nan
+
+    # ── Per-inverter flag evaluation ───────────────────────────────────────────
+    COLOR_RANK = {"red": 2, "yellow": 1, "green": 0, "grey": -1}
+    health = {}
+
+    for inv in inv_ids:
+        flags = {}
+
+        # 1. Performance Ratio ─────────────────────────────────────────────────
+        pr_raw = latest.get(f"{inv}_PR", np.nan)
+        if pd.isna(pr_raw):
+            flags["pr"] = "grey"
+        else:
+            # Normalise: VCOM can return 0–1 or 0–100
+            pr = float(pr_raw) / 100.0 if float(pr_raw) > 1 else float(pr_raw)
+            if pr >= 0.85:
+                flags["pr"] = "green"
+            elif pr >= 0.75:
+                flags["pr"] = "yellow"
+            else:
+                flags["pr"] = "red"
+
+        # 2. Inverter Temperature ──────────────────────────────────────────────
+        temp_raw = latest.get(f"{inv}_TEMP", np.nan)
+        if pd.isna(temp_raw):
+            flags["temp"] = "grey"
+        else:
+            t = float(temp_raw)
+            if t <= 40:
+                flags["temp"] = "green"
+            elif t <= 45:
+                flags["temp"] = "yellow"
+            else:
+                flags["temp"] = "red"
+
+        # 3. DC Current Variance (relative to site median) ────────────────────
+        inv_dc = inv_dc_means.get(inv, np.nan)
+        if pd.isna(inv_dc) or pd.isna(site_dc_median) or site_dc_median <= 0:
+            flags["dc_current"] = "grey"          # Night or no DC data — bypass
+        else:
+            # Red if inverter DC drops below 15 % of the site median
+            flags["dc_current"] = "red" if inv_dc < site_dc_median * 0.15 else "green"
+
+        # 4. AC Power Variance (relative to site median) ──────────────────────
+        ac_raw = latest.get(inv, np.nan)
+        if pd.isna(ac_raw) or pd.isna(site_ac_median) or site_ac_median <= 0:
+            flags["ac_power"] = "grey"            # Night or no AC data — bypass
+        else:
+            # Red if inverter AC is more than 3 % below the site median
+            flags["ac_power"] = "red" if float(ac_raw) < site_ac_median * 0.97 else "green"
+
+        # Overall: worst non-grey flag wins; "grey" only when every flag is grey
+        worst = max(flags.values(), key=lambda s: COLOR_RANK.get(s, -1))
+        flags["overall_status"] = worst if worst != "grey" else "grey"
+
+        health[inv] = flags
+
+    logger.info(f"Health flags computed for {len(health)} inverters.")
+    return health
+
+
 def analyze_site(directory):
     logger.info("Starting forensic analysis of plant data...")
     
@@ -89,7 +206,8 @@ def analyze_site(directory):
         dashboard_data = {
             "macro_health": {"total_inverters": 0, "online": 0, "tripped": 0, "comms_lost": 0},
             "anomalies": [],
-            "file_statuses": file_statuses
+            "file_statuses": file_statuses,
+            "inverter_health": {}
         }
     else:
         # Standardize timestamps for all available dataframes
@@ -209,7 +327,8 @@ def analyze_site(directory):
         dashboard_data = {
             "macro_health": {"total_inverters": len(inv_ids), "online": 0, "tripped": 0, "comms_lost": 0},
             "anomalies": unique_anomalies[-50:],
-            "file_statuses": file_statuses
+            "file_statuses": file_statuses,
+            "inverter_health": compute_health_flags(merged, inv_ids)
         }
         dashboard_data["macro_health"]["online"] = int((pot_df.iloc[-1][inv_ids] > 0).sum()) if not pot_df.empty else 0
         dashboard_data["macro_health"]["tripped"] = int((pot_df.iloc[-1][inv_ids] == 0).sum()) if not pot_df.empty else 0
@@ -239,6 +358,8 @@ def analyze_site(directory):
         logger.info(f"Analysis saved to daily JSON: {daily_json_path}")
     except Exception as e:
         logger.error(f"Failed to write JSON: {e}")
+
+    cleanup_old_daily_jsons(directory)
 
 class VCOMHandler(FileSystemEventHandler):
     def __init__(self, directory):
