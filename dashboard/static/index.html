@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mazara Monitoring - Plant Health</title>
+    <link rel="stylesheet" href="static/style.css">
+</head>
+<body class="dark-mode">
+    <div class="container">
+        <header>
+            <div class="header-left">
+                <h1>☀️ Plant Health Monitoring</h1>
+                <p class="subtitle">Solar Plant Performance & Diagnostics</p>
+            </div>
+            <div class="header-right">
+                <span id="last-sync" class="status-badge">Last Sync: --:--:--</span>
+            </div>
+        </header>
+
+        <section class="metrics-grid">
+            <div class="metric-card card-total">
+                <span class="label">Total Inverters</span>
+                <span id="total-inv" class="value">0</span>
+            </div>
+            <div class="metric-card card-online">
+                <span class="label">Online & Producing</span>
+                <span id="online-inv" class="value">0</span>
+            </div>
+            <div class="metric-card card-tripped">
+                <span class="label">Tripped (0W)</span>
+                <span id="tripped-inv" class="value">0</span>
+            </div>
+            <div class="metric-card card-comms">
+                <span class="label">Comms Lost</span>
+                <span id="comms-lost" class="value">0</span>
+            </div>
+        </section>
+
+        <section class="anomalies-section">
+            <h2>Active Diagnostic Alerts</h2>
+            <div id="alerts-container" class="alerts-grid">
+                <!-- Alerts populated by JS -->
+                <p class="placeholder-text">Waiting for data updates...</p>
+            </div>
+        </section>
+
+        <section class="history-section">
+            <h2>Historical Alarm Trail</h2>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Inverter</th>
+                            <th>Type</th>
+                            <th>Severity</th>
+                            <th>Details</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body">
+                        <!-- History populated by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+    <script src="static/app.js"></script>
+</body>
+</html>

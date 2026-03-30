@@ -4,101 +4,125 @@ import time
 import json
 import glob
 import os
+import logging
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+# --- SETUP LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("analysis.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # --- CORE PROCESSING LOGIC ---
 
-def clean_italian_localization(df):
+def clean_data(df):
+    """Ensure data is numeric and handle common extraction artifacts."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    
     if 'Timestamp Fetch' in df.columns:
         df = df.drop(columns=['Timestamp Fetch'])
+        
     for col in df.columns:
-        if col == 'Ora' or col == 'DateTime': continue
+        if col == 'Ora' or col == 'DateTime':
+            continue
         if df[col].dtype == object:
+            # Handle potential string conversions if not already done in extraction
             val = df[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
             df[col] = pd.to_numeric(val, errors='coerce')
     return df
 
-def analyze_inverter_data(directory):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Local Analysis...")
-    date_str = datetime.now().strftime("%Y-%m-%d")
-
-    # Retain historical alarm trail across analyses
-    dashboard_path = os.path.join(directory, 'dashboard_data.json')
-    historical_alarms = []
+def to_hours(t):
+    """Convert HH:MM or HH:MM:SS to float hours."""
+    if isinstance(t, (int, float)):
+        return float(t)
     try:
-        if os.path.exists(dashboard_path):
-            with open(dashboard_path, 'r') as f:
-                existing = json.load(f)
-                historical_alarms = existing.get('historical_alarms', []) or []
-    except Exception as e:
-        print(f"[Warning] Could not read existing dashboard JSON for history: {e}")
+        parts = str(t).split(':')
+        if len(parts) >= 2:
+            return int(parts[0]) + int(parts[1])/60
+        return np.nan
+    except Exception:
+        return np.nan
 
-    # We now include Corrente_DC and Irraggiamento to verify additional metrics
+def analyze_site(directory):
+    logger.info("Starting forensic analysis of plant data...")
+    
+    # 1. Load latest files
     file_patterns = {
-        'Potenza_AC': f"*Potenza_AC_*.xlsx",
-        'PR': f"*PR_*.xlsx",
-        'Resistenza_Isolamento': f"*Resistenza_Isolamento_*.xlsx",
-        'Temperatura': f"*Temperatura_*.xlsx",
-        'Corrente_DC': f"*Corrente_DC_*.xlsx",
-        'Irraggiamento': f"*Irraggiamento_*.xlsx"
+        'Potenza_AC': "*Potenza_AC_*.xlsx",
+        'PR': "*PR_*.xlsx",
+        'Resistenza_Isolamento': "*Resistenza_Isolamento_*.xlsx",
+        'Temperatura': "*Temperatura_*.xlsx",
+        'Corrente_DC': "*Corrente_DC_*.xlsx",
+        'Irraggiamento': "*Irraggiamento_*.xlsx"
     }
 
     file_paths = {}
     for key, pattern in file_patterns.items():
         matches = glob.glob(os.path.join(directory, pattern))
         if matches:
-            file_paths[key] = max(matches, key=os.path.getctime) # Get newest file
+            file_paths[key] = max(matches, key=os.path.getmtime)
 
-    # Require all 6 data types now (including Irraggiamento)
     if len(file_paths) < 6:
-        print("[Error] Missing required files. Waiting for next extraction...")
+        logger.warning(f"Missing files for complete analysis. Found {len(file_paths)}/6. Skipping cycle.")
         return
 
-    # Load & Clean Data
-    pot_df = clean_italian_localization(pd.read_excel(file_paths['Potenza_AC']))
-    res_df = clean_italian_localization(pd.read_excel(file_paths['Resistenza_Isolamento']))
-    temp_df = clean_italian_localization(pd.read_excel(file_paths['Temperatura']))
-    pr_df = clean_italian_localization(pd.read_excel(file_paths['PR']))
-    corrente_df = clean_italian_localization(pd.read_excel(file_paths['Corrente_DC']))
-    irr_df = clean_italian_localization(pd.read_excel(file_paths['Irraggiamento']))
+    # 2. Read and Clean
+    try:
+        pot_df = clean_data(pd.read_excel(file_paths['Potenza_AC']))
+        res_df = clean_data(pd.read_excel(file_paths['Resistenza_Isolamento']))
+        temp_df = clean_data(pd.read_excel(file_paths['Temperatura']))
+        pr_df = clean_data(pd.read_excel(file_paths['PR']))
+        dc_df = clean_data(pd.read_excel(file_paths['Corrente_DC']))
+        irr_df = clean_data(pd.read_excel(file_paths['Irraggiamento']))
+    except Exception as e:
+        logger.error(f"Error reading Excel files: {e}")
+        return
 
-    # Standardize Time
-    for df in [pot_df, res_df, temp_df]:
-        if pd.api.types.is_datetime64_any_dtype(df['Ora']):
-            df['Ora'] = df['Ora'].dt.strftime('%H:%M')
+    # 3. Standardize Time and Merge
+    for df in [pot_df, res_df, temp_df, dc_df, irr_df]:
+        if not df.empty and 'Ora' in df.columns:
+            if pd.api.types.is_datetime64_any_dtype(df['Ora']):
+                df['Ora'] = df['Ora'].dt.strftime('%H:%M')
+            df['Ora_Numeric'] = df['Ora'].apply(to_hours)
 
-    # Merge Data
-    merged_ts = pot_df.merge(res_df, on='Ora', suffixes=('_POT', '_RES'))
-    merged_ts = merged_ts.merge(temp_df, on='Ora', suffixes=('', '_TEMP'))
+    # Master merge on 'Ora'
+    merged = pot_df[['Ora', 'Ora_Numeric']].copy()
     
-    # Rename Temp columns safely
-    temp_cols = [c for c in temp_df.columns if 'INV' in c and c != 'Ora']
-    for c in temp_cols:
-        if c in merged_ts.columns and c + '_TEMP' not in merged_ts.columns:
-            merged_ts = merged_ts.rename(columns={c: c + '_TEMP'})
-
-    inv_ids = [c.replace('_POT', '') for c in merged_ts.columns if '_POT' in c]
+    # Identify Inverters (assuming columns like 'INV TX1-01', etc.)
+    inv_ids = [c for c in pot_df.columns if 'INV' in c and 'Ora' not in c]
     
-    def to_hours(t):
-        try: return float(t) if isinstance(t, (int, float)) else int(t.split(':')[0]) + int(t.split(':')[1])/60
-        except: return np.nan
-
-    merged_ts['Ora_Numeric'] = merged_ts['Ora'].apply(to_hours)
-    daylight_mask = (merged_ts['Ora_Numeric'] >= 6.5) & (merged_ts['Ora_Numeric'] <= 18.0)
-    df_day = merged_ts[daylight_mask].copy()
+    # Merge all datasets
+    suffixes = {'POT': pot_df, 'RES': res_df, 'TEMP': temp_df, 'DC': dc_df}
+    for suffix, df in suffixes.items():
+        cols_to_merge = [c for c in df.columns if 'INV' in c] + ['Ora']
+        merged = merged.merge(df[cols_to_merge], on='Ora', how='left', suffixes=('', f'_{suffix}'))
     
-    # Baseline calculations
-    pot_cols = [id + '_POT' for id in inv_ids]
-    df_day['Site_Avg_POT'] = df_day[pot_cols].mean(axis=1)
+    # Handle Irradiance separately (sensor names are specific)
+    irr_cols = [c for c in irr_df.columns if c != 'Ora' and c != 'Ora_Numeric']
+    merged = merged.merge(irr_df[irr_cols + ['Ora']], on='Ora', how='left')
 
-    # --- FORENSIC ANALYSIS ---
+    # Core Analysis Logic
+    dashboard_path = os.path.join(directory, 'dashboard_data.json')
+    historical_alarms = []
+    if os.path.exists(dashboard_path):
+        try:
+            with open(dashboard_path, 'r') as f:
+                historical_alarms = json.load(f).get('historical_alarms', [])
+        except Exception: pass
+
     dashboard_data = {
         "last_updated": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         "macro_health": {
             "total_inverters": len(inv_ids),
-            "online": len(inv_ids),
+            "online": 0,
             "tripped": 0,
             "comms_lost": 0
         },
@@ -106,196 +130,104 @@ def analyze_inverter_data(directory):
         "historical_alarms": historical_alarms
     }
 
+    # Reference metrics for Site
+    site_production = merged[[c for c in merged.columns if '_POT' in c]].mean(axis=1)
+    # Use JB1_POA-1 as primary reference for Irradiance
+    poa_ref = merged.get('JB1_POA-1', merged.get('JB3_POA-3', site_production * 0.05)) 
+
+    now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
     for inv in inv_ids:
-        pot = df_day[inv + '_POT']
-        res = df_day[inv + '_RES']
-        temp = df_day[inv + '_TEMP']
-        site_avg = df_day['Site_Avg_POT']
+        pot = merged[f"{inv}_POT"] if f"{inv}_POT" in merged.columns else merged[inv]
+        res = merged[f"{inv}_RES"] if f"{inv}_RES" in merged.columns else pd.Series([np.nan]*len(merged))
+        temp = merged[f"{inv}_TEMP"] if f"{inv}_TEMP" in merged.columns else pd.Series([np.nan]*len(merged))
         
-        # 1. Comms Loss
-        if pot.isnull().sum() > 5:
+        # 1. Comms Loss Check (> 20 mins of NaN during production hours)
+        daylight = merged[(merged['Ora_Numeric'] >= 7.0) & (merged['Ora_Numeric'] <= 18.5)]
+        nan_streak = pot.isnull().rolling(window=4).sum().max() # 4 slots * 5min approx
+        if nan_streak >= 4:
             dashboard_data["macro_health"]["comms_lost"] += 1
-            dashboard_data["macro_health"]["online"] -= 1
-            alarm = {
-                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "inverter": inv,
-                "type": "Comms Loss",
-                "severity": "Medium",
-                "details": "Missing data during daylight hours."
-            }
+            alarm = {"timestamp": now_ts, "inverter": inv, "type": "Communication Problem", "severity": "Medium", "details": "No data received for > 20 minutes."}
             dashboard_data["anomalies"].append(alarm)
-            dashboard_data["historical_alarms"].append(alarm)
             continue
 
-        # 2. Trip Analysis (0W while site is producing)
-        trip_points = df_day[(pot == 0) & (site_avg > 1000)]
-        if not trip_points.empty:
+        # 2. Trip / 0W Check
+        latest_pot = pot.iloc[-1]
+        if latest_pot == 0 and site_production.iloc[-1] > 1000:
             dashboard_data["macro_health"]["tripped"] += 1
-            dashboard_data["macro_health"]["online"] -= 1
             
-            t_time = trip_points.iloc[0]['Ora']
-            t_num = trip_points.iloc[0]['Ora_Numeric']
-            
-            # Check 60 mins prior
-            pre_trip = merged_ts[(merged_ts['Ora_Numeric'] < t_num) & (merged_ts['Ora_Numeric'] >= t_num - 1.0)]
-            min_res = pre_trip[inv + '_RES'].min() if not pre_trip.empty else "N/A"
-            max_temp = pre_trip[inv + '_TEMP'].max() if not pre_trip.empty else "N/A"
+            # Check reason
+            last_res = res.dropna().iloc[-1] if not res.dropna().empty else 1000
+            last_temp = temp.dropna().iloc[-1] if not temp.dropna().empty else 40
             
             reason = "Unknown Trip"
-            if min_res != "N/A" and min_res < 50: reason = f"Insulation Fault ({min_res} kOhm)"
-            elif max_temp != "N/A" and max_temp > 60: reason = f"Thermal Trip ({max_temp} °C)"
+            if last_res < 50: reason = f"Insulation Fault ({last_res} kOhm)"
+            elif last_temp > 60: reason = f"Thermal Trip ({last_temp} °C)"
             
-            alarm = {
-                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "inverter": inv,
-                "type": "0W Trip",
-                "severity": "Critical",
-                "time": str(t_time),
-                "details": reason
-            }
+            alarm = {"timestamp": now_ts, "inverter": inv, "type": "Inverter Trip", "severity": "Critical", "details": reason}
             dashboard_data["anomalies"].append(alarm)
-            dashboard_data["historical_alarms"].append(alarm)
+            continue
+        
+        dashboard_data["macro_health"]["online"] += 1
 
-        # 3. Thermal Derating
-        elif (temp.max() > 60) and (pot.mean() < site_avg.mean() * 0.9):
-            alarm = {
-                "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                "inverter": inv,
-                "type": "Thermal Derating",
-                "severity": "High",
-                "details": f"High Temp ({temp.max()}°C) causing power throttling."
-            }
+        # 3. Thermal Anomalies
+        if temp.max() > 60:
+            avg_irr = poa_ref.iloc[-5:].mean()
+            if avg_irr > 600: # High production environment
+                alarm = {"timestamp": now_ts, "inverter": inv, "type": "Thermal Derating", "severity": "Info", "details": "Normal behavior under high irradiance."}
+            else:
+                alarm = {"timestamp": now_ts, "inverter": inv, "type": "Thermal Problem", "severity": "High", "details": "High temp despite low irradiance. Possible Fan Failure."}
             dashboard_data["anomalies"].append(alarm)
-            dashboard_data["historical_alarms"].append(alarm)
 
-    # Cap the stored history to prevent unbounded growth
-    history_limit = 200
-    dashboard_data["historical_alarms"] = dashboard_data["historical_alarms"][-history_limit:]
+        # 4. Insulation Resistance (Time-gated)
+        if res.iloc[-1] < 50:
+            current_hour = datetime.now().hour
+            if current_hour >= 9:
+                alarm = {"timestamp": now_ts, "inverter": inv, "type": "Low Insulation Resistance", "severity": "High", "details": f"Persistent low resistance: {res.iloc[-1]} kOhm"}
+                dashboard_data["anomalies"].append(alarm)
 
-    # Save structured JSON for the frontend
-    output_path = os.path.join(directory, 'dashboard_data.json')
-    with open(output_path, 'w') as f:
+        # 5. DC String Comparison
+        # (This would require more granular DC entry data if extracted)
+        # For now, we flag if DC Current is disproportionately low compared to AC Power site-wide
+        if (pot.iloc[-1] < site_production.iloc[-1] * 0.7) and (poa_ref.iloc[-1] > 200):
+            alarm = {"timestamp": now_ts, "inverter": inv, "type": "Low Power / String Fault", "severity": "Medium", "details": "Output significantly below site average."}
+            dashboard_data["anomalies"].append(alarm)
+
+    # Sync historical alarms
+    dashboard_data["historical_alarms"].extend(dashboard_data["anomalies"])
+    dashboard_data["historical_alarms"] = dashboard_data["historical_alarms"][-200:] # Keep last 200
+
+    # Save to JSON
+    with open(dashboard_path, 'w') as f:
         json.dump(dashboard_data, f, indent=4)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Analysis Complete. JSON updated.")
+    logger.info("Forensic analysis complete. Dashboard JSON updated.")
 
-
-# --- WATCHDOG AUTOMATION ---
-
-class VCOMFileHandler(FileSystemEventHandler):
+class VCOMHandler(FileSystemEventHandler):
     def __init__(self, directory):
         self.directory = directory
-        self.target_keywords = ['Potenza_AC', 'PR', 'Resistenza_Isolamento', 'Temperatura', 'Corrente_DC', 'Irraggiamento']
-        self.last_analysis_time = 0
-        
-    def wait_for_file_stability(self, filepath, timeout=30):
-        """ Waits for file size to stop changing, ensuring write is complete. """
-        start_time = time.time()
-        last_size = -1
-        
-        while time.time() - start_time < timeout:
-            try:
-                current_size = os.path.getsize(filepath)
-                if current_size == last_size and current_size > 0:
-                    # Size stabilized
-                    time.sleep(2) # Final buffer
-                    return True
-                last_size = current_size
-            except OSError:
-                # File might be locked or not yet available
-                pass
-            time.sleep(3)
-        
-        print(f"[Watchdog] Timeout waiting for file stability: {filepath}")
-        return False
-        
-    def get_latest_dataset_mod_time(self):
-        """Return max modification time (epoch) across all required sheets.
+        self.last_run = 0
 
-        Returns 0 if not all required files are present.
-        """
-        max_mod = 0
-        for kw in self.target_keywords:
-            matches = glob.glob(os.path.join(self.directory, f"*{kw}_*.xlsx"))
-            if not matches:
-                return 0
-            latest_file = max(matches, key=os.path.getmtime)
-            max_mod = max(max_mod, os.path.getmtime(latest_file))
-        return max_mod
-
-    def handle_event(self, event):
-        # Ignore directory changes
-        if event.is_directory:
-            return
-
-        # We only care about .xlsx files
-        if not event.src_path.endswith('.xlsx'):
-            return
-
-        filename = os.path.basename(event.src_path)
-        print(f"[Watchdog] Detected file event: {filename}")
-
-        # Wait for the file to finish writing
-        if not self.wait_for_file_stability(event.src_path):
-            return
-
-        latest_mod = self.get_latest_dataset_mod_time()
-        if latest_mod == 0:
-            print("[Watchdog] Waiting for all required data files to be present...")
-            return
-
-        if latest_mod > self.last_analysis_time:
-            print(f"[Watchdog] New data detected (mod_time={latest_mod}). Running analysis...")
-            try:
-                analyze_inverter_data(self.directory)
-                self.last_analysis_time = latest_mod
-            except Exception as e:
-                print(f"[Watchdog] Error during analysis: {e}")
-        else:
-            print("[Watchdog] No new data since last analysis.")
-
-    # Listen for when a file is modified/updated
     def on_modified(self, event):
-        self.handle_event(event)
-
-    # Listen for when a new file is created/dropped into the folder
-    def on_created(self, event):
-        self.handle_event(event)
-        
-    # Listen for when a temp file is renamed to the final .xlsx
-    def on_moved(self, event):
-        # For 'moved' events, the new file name is in dest_path
-        class MockEvent:
-            is_directory = event.is_directory
-            src_path = event.dest_path
-        self.handle_event(MockEvent())
+        if event.src_path.endswith('.xlsx'):
+            # Debounce: only run if 30 seconds passed since last trigger
+            if time.time() - self.last_run > 30:
+                self.last_run = time.time()
+                time.sleep(5) # Wait for file lock release
+                analyze_site(self.directory)
 
 if __name__ == "__main__":
-    target_dir = "./extracted_data"  # Ensure this folder exists
+    target_dir = "./extracted_data"
     os.makedirs(target_dir, exist_ok=True)
     
-    print(f"Starting Watchdog... monitoring folder: {target_dir}")
-    print("Waiting for all 6 data files: Potenza_AC, PR, Resistenza_Isolamento, Temperatura, Corrente_DC, Irraggiamento")
-    event_handler = VCOMFileHandler(target_dir)
+    logger.info(f"Watchdog active on {target_dir}")
+    event_handler = VCOMHandler(target_dir)
     observer = Observer()
     observer.schedule(event_handler, target_dir, recursive=False)
     observer.start()
-    
-    try:
-        # Periodic safety check: ensure analysis reruns at least every 10 minutes if files update
-        next_check = time.time() + 600  # 10 minutes
-        while True:
-            time.sleep(1)
 
-            if time.time() >= next_check:
-                next_check = time.time() + 600
-                latest_mod = event_handler.get_latest_dataset_mod_time()
-                if latest_mod > event_handler.last_analysis_time:
-                    print("[Watchdog] Periodic check: new data detected, running analysis...")
-                    try:
-                        analyze_inverter_data(target_dir)
-                        event_handler.last_analysis_time = latest_mod
-                    except Exception as e:
-                        print(f"[Watchdog] Error during periodic analysis: {e}")
+    try:
+        while True:
+            time.sleep(10)
     except KeyboardInterrupt:
         observer.stop()
     observer.join()

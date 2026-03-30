@@ -1,5 +1,7 @@
+import logging
 import time
 import os
+import json
 from datetime import datetime
 import pandas as pd
 from playwright.sync_api import sync_playwright
@@ -11,8 +13,16 @@ from temperature_monitor import extract_temperature_data
 from corrente_dc_monitor import extract_corrente_dc_data
 from irradiance_monitor import extract_irradiance_data
 
-
-import json
+# --- SETUP LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("monitoring.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Paths relative to this script's location
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,16 +31,59 @@ _EXTRACTED_DATA_DIR = os.path.join(_ROOT_DIR, "extracted_data")
 
 # Read configuration from config.json at root
 config_path = os.path.join(_ROOT_DIR, "config.json")
-with open(config_path, "r") as f:
-    config_data = json.load(f)
+try:
+    with open(config_path, "r") as f:
+        config_data = json.load(f)
+except Exception as e:
+    logger.error(f"Failed to load config.json: {e}")
+    raise
 
 USERNAME = config_data.get("USERNAME")
 PASSWORD = config_data.get("PASSWORD")
 SYSTEM_URL = config_data.get("SYSTEM_URL")
 
+# Inverter ID Mapping based on provided HTML
+INVERTER_IDS = [
+    "Id2784833",   # INV TX1-01
+    "Id2784832",   # INV TX1-02
+    "Id2784831",   # INV TX1-03
+    "Id27848312",  # INV TX1-04
+    "Id2784835",   # INV TX1-05
+    "Id2784837",   # INV TX1-06
+    "Id27848310",  # INV TX1-07
+    "Id2784838",   # INV TX1-08
+    "Id2784839",   # INV TX1-09
+    "Id2784834",   # INV TX1-10
+    "Id2784836",   # INV TX1-11
+    "Id27848311",  # INV TX1-12
+    "Id27848212",  # INV TX2-01
+    "Id27848211",  # INV TX2-02
+    "Id2784822",   # INV TX2-03
+    "Id2784829",   # INV TX2-04
+    "Id27848210",  # INV TX2-05
+    "Id2784821",   # INV TX2-06
+    "Id2784828",   # INV TX2-07
+    "Id2784823",   # INV TX2-08
+    "Id2784824",   # INV TX2-09
+    "Id2784825",   # INV TX2-10
+    "Id2784827",   # INV TX2-11
+    "Id2784826",   # INV TX2-12
+    "Id2784879",   # INV TX3-01
+    "Id2784872",   # INV TX3-02
+    "Id2784877",   # INV TX3-03
+    "Id2784875",   # INV TX3-04
+    "Id2784874",   # INV TX3-05
+    "Id2784876",   # INV TX3-06
+    "Id2784873",   # INV TX3-07
+    "Id27848712",  # INV TX3-08
+    "Id27848710",  # INV TX3-09
+    "Id2784878",   # INV TX3-10
+    "Id2784871",   # INV TX3-11
+    "Id27848711"   # INV TX3-12
+]
 
 def login(page):
-    print("Logging into VCOM meteocontrol...")
+    logger.info("Logging into VCOM meteocontrol...")
     page.goto(SYSTEM_URL, timeout=60000)
 
     # Wait for login form
@@ -45,141 +98,140 @@ def login(page):
     try:
         if page.locator('button:has-text("Usa solo i cookie necessari")').is_visible(timeout=5000):
             page.locator('button:has-text("Usa solo i cookie necessari")').click()
-    except:
+    except Exception:
         pass
 
-    print("Post-login redirect handling...")
+    logger.info("Post-login redirect handling...")
     page.wait_for_selector('text="Valutazione"', timeout=60000)
     page.locator('text="Valutazione"').first.click()
 
     try:
         page.wait_for_selector('text="Inverter"', timeout=30000)
-        print("Successfully logged in and reached the Evaluation dashboard.")
+        logger.info("Successfully logged in and reached the Evaluation dashboard.")
     except Exception as e:
-        print(f"Failed to reach dashboard or timeout: {e}")
+        logger.error(f"Failed to reach dashboard or timeout: {e}")
         page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "login_error.png"))
 
+def select_inverters(page):
+    """Ensures only the specific 36 inverters are selected, excluding SunGrow."""
+    logger.info("Selecting target inverters and excluding SunGrow...")
+    try:
+        # Open component selection if it's not visible
+        # (Usually it is visible in 'Valutazione' under components section)
+        
+        # Deselect all first to have a clean slate
+        if page.locator('button:has-text("Deselect all")').is_visible():
+            page.locator('button:has-text("Deselect all")').click()
+            time.sleep(1)
+
+        for inv_id in INVERTER_IDS:
+            checkbox_id = f"checkbox-{inv_id}"
+            cb = page.locator(f"input#{checkbox_id}")
+            if cb.is_visible():
+                cb.check()
+        
+        # Explicitly ensure SunGrow is unchecked
+        sungrow_cb = page.locator('input[id*="Id27848313"]') # Based on snippet
+        if sungrow_cb.is_visible() and sungrow_cb.is_checked():
+            sungrow_cb.uncheck()
+
+        # Click Update chart
+        if page.locator('button:has-text("Aggiorna grafico"), button:has-text("Update chart")').is_visible():
+            page.locator('button:has-text("Aggiorna grafico"), button:has-text("Update chart")').click()
+            time.sleep(2)
+            
+    except Exception as e:
+        logger.warning(f"Error during inverter selection: {e}")
 
 def append_df_to_excel(filename, df, sheet_name='Sheet1'):
     """Append a DataFrame to an existing Excel file, or create it if it doesn't exist."""
     if not os.path.exists(filename):
-        # Create new file
         df.to_excel(filename, index=False, sheet_name=sheet_name)
     else:
-        # Append to existing file
         with pd.ExcelWriter(filename, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
-            # Check if sheet exists to decide whether to write header
             write_header = sheet_name not in writer.sheets
-
-            # Find the last row in the existing sheet
             startrow = writer.sheets[sheet_name].max_row if not write_header else 0
-
             df.to_excel(writer, sheet_name=sheet_name, startrow=startrow, index=False, header=write_header)
 
-
 def export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc, df_irradiance):
-
-    """Append DataFrames to separate Excel files in the extracted_data folder."""
     today_str = datetime.now().strftime("%Y-%m-%d")
     current_time = datetime.now().strftime("%H:%M:%S")
 
-    # Ensure output directory exists
     os.makedirs(_EXTRACTED_DATA_DIR, exist_ok=True)
 
-    # Define separate filenames
-    file_pr = os.path.join(_EXTRACTED_DATA_DIR, f"PR_{today_str}.xlsx")
-    file_ac = os.path.join(_EXTRACTED_DATA_DIR, f"Potenza_AC_{today_str}.xlsx")
-    file_insulation = os.path.join(_EXTRACTED_DATA_DIR, f"Resistenza_Isolamento_{today_str}.xlsx")
-    file_temp = os.path.join(_EXTRACTED_DATA_DIR, f"Temperatura_{today_str}.xlsx")
-    file_dc = os.path.join(_EXTRACTED_DATA_DIR, f"Corrente_DC_{today_str}.xlsx")
-    file_irradiance = os.path.join(_EXTRACTED_DATA_DIR, f"Irraggiamento_{today_str}.xlsx")
+    files = {
+        "PR": os.path.join(_EXTRACTED_DATA_DIR, f"PR_{today_str}.xlsx"),
+        "Potenza_AC": os.path.join(_EXTRACTED_DATA_DIR, f"Potenza_AC_{today_str}.xlsx"),
+        "Resistenza_Isolamento": os.path.join(_EXTRACTED_DATA_DIR, f"Resistenza_Isolamento_{today_str}.xlsx"),
+        "Temperatura": os.path.join(_EXTRACTED_DATA_DIR, f"Temperatura_{today_str}.xlsx"),
+        "Corrente_DC": os.path.join(_EXTRACTED_DATA_DIR, f"Corrente_DC_{today_str}.xlsx"),
+        "Irraggiamento": os.path.join(_EXTRACTED_DATA_DIR, f"Irraggiamento_{today_str}.xlsx")
+    }
 
+    logger.info(f"Exporting data for cycle at {current_time}...")
 
-    print(f"\n[{current_time}] Esportazione/Accodamento dei dati in corso...")
+    data_map = {
+        "PR": df_pr,
+        "Potenza_AC": df_ac,
+        "Resistenza_Isolamento": df_insulation,
+        "Temperatura": df_temp,
+        "Corrente_DC": df_dc,
+        "Irraggiamento": df_irradiance
+    }
 
-    try:
-        # Append PR Data
-        if not df_pr.empty:
-            df_pr.insert(0, 'Timestamp Fetch', current_time)
-            append_df_to_excel(file_pr, df_pr)
-            print(f"[OK] Accodato: {file_pr}")
-
-        # Append AC Data
-        if not df_ac.empty:
-            df_ac.insert(0, 'Timestamp Fetch', current_time)
-            append_df_to_excel(file_ac, df_ac)
-            print(f"[OK] Accodato: {file_ac}")
-
-        # Append Insulation Data
-        if not df_insulation.empty:
-            df_insulation.insert(0, 'Timestamp Fetch', current_time)
-            append_df_to_excel(file_insulation, df_insulation)
-            print(f"[OK] Accodato: {file_insulation}")
-
-        # Append Temperature Data
-        if not df_temp.empty:
-            df_temp.insert(0, 'Timestamp Fetch', current_time)
-            append_df_to_excel(file_temp, df_temp)
-            print(f"[OK] Accodato: {file_temp}")
-
-        # Append Corrente DC Data
-        if not df_dc.empty:
-            df_dc.insert(0, 'Timestamp Fetch', current_time)
-            append_df_to_excel(file_dc, df_dc)
-            print(f"[OK] Accodato: {file_dc}")
-
-        # Append Irraggiamento Data
-        if not df_irradiance.empty:
-            df_irradiance.insert(0, 'Timestamp Fetch', current_time)
-            append_df_to_excel(file_irradiance, df_irradiance)
-            print(f"[OK] Accodato: {file_irradiance}")
-
-        print(f"[FINISH] Tutti i file ({sum([not df.empty for df in [df_pr, df_ac, df_insulation, df_temp, df_dc]])}) sono stati aggiornati con successo.")
-
-
-    except Exception as e:
-        print(f"[ERROR] Failed to export/append files: {e}")
-
+    count = 0
+    for key, df in data_map.items():
+        if df is not None and not df.empty:
+            if 'Timestamp Fetch' not in df.columns:
+                df.insert(0, 'Timestamp Fetch', current_time)
+            append_df_to_excel(files[key], df)
+            logger.info(f"[OK] Appended: {files[key]}")
+            count += 1
+    
+    logger.info(f"[FINISH] {count}/6 files updated successfully.")
 
 def run_extraction_cycle(page):
-    """Runs a single extraction and export cycle."""
-    try:
-        # --- PR ---
-        df_pr = extract_pr_data(page)
-        time.sleep(2)
+    """Runs a single extraction and export cycle with retries."""
+    
+    # Ensure inverters are correctly selected at the start of cycle
+    select_inverters(page)
 
-        # --- Potenza AC ---
-        df_ac = extract_potenza_ac_data(page)
-        time.sleep(2)
+    metrics = [
+        ("PR", extract_pr_data),
+        ("Potenza AC", extract_potenza_ac_data),
+        ("Insulation", extract_insulation_resistance_data),
+        ("Temperature", extract_temperature_data),
+        ("Corrente DC", extract_corrente_dc_data),
+        ("Irraggiamento", extract_irradiance_data)
+    ]
 
-        # --- Insulation Resistance ---
-        df_insulation = extract_insulation_resistance_data(page)
-        time.sleep(2)
+    results = {}
+    for name, func in metrics:
+        success = False
+        for attempt in range(2): # 2 attempts per metric
+            try:
+                results[name] = func(page)
+                success = True
+                break
+            except Exception as e:
+                logger.error(f"Attempt {attempt+1} failed for {name}: {e}")
+                page.screenshot(path=os.path.join(_ROOT_DIR, "errors", f"error_{name.replace(' ', '_')}_{attempt+1}.png"))
+                time.sleep(5)
+        if not success:
+            logger.warning(f"Metric {name} failed after all attempts. Moving to next.")
+            results[name] = pd.DataFrame()
 
-        # --- Temperature ---
-        df_temp = extract_temperature_data(page)
-        time.sleep(2)
-
-        # --- Corrente DC ---
-        df_dc = extract_corrente_dc_data(page)
-        time.sleep(2)
-
-        # --- Irraggiamento ---
-        df_irradiance = extract_irradiance_data(page)
-
-        # --- Export ---
-        export_to_excel(df_pr, df_ac, df_insulation, df_temp, df_dc, df_irradiance)
-
-    except Exception as e:
-        print(f"\n[ERROR] An error occurred during extraction cycle: {e}")
-        page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "error_screenshot.png"))
-        print("Saved errors/error_screenshot.png for debugging.")
-
+    export_to_excel(
+        results["PR"], 
+        results["Potenza AC"], 
+        results["Insulation"], 
+        results["Temperature"], 
+        results["Corrente DC"], 
+        results["Irraggiamento"]
+    )
 
 def main():
     extraction_interval_minutes = 10
-
-    # Ensure errors folder exists
     os.makedirs(os.path.join(_ROOT_DIR, "errors"), exist_ok=True)
 
     with sync_playwright() as p:
@@ -190,39 +242,36 @@ def main():
         try:
             login(page)
 
-            # Dismiss cookie banner if it appears
-            try:
-                if page.locator('button:has-text("Usa solo i cookie necessari")').is_visible(timeout=2000):
-                    page.locator('button:has-text("Usa solo i cookie necessari")').click()
-            except:
-                pass
-
-            # Loop indefinitely
             cycle_count = 1
             while True:
-                print(f"\n=== Avvio Ciclo di Estrazione #{cycle_count} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===")
-
-                # Make sure we're on the dashboard
+                logger.info(f"=== Starting Extraction Cycle #{cycle_count} ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')}) ===")
+                
                 try:
-                    page.locator('text="Valutazione"').first.click()
-                    time.sleep(2)
-                except:
-                    pass
+                    # Check if session is still alive by searching for a dashboard element
+                    if not page.locator('text="Valutazione"').is_visible(timeout=5000):
+                        logger.warning("Session might have expired. Re-logging in...")
+                        login(page)
+                    else:
+                        page.locator('text="Valutazione"').first.click()
+                        time.sleep(2)
+                except Exception:
+                    logger.warning("Navigation error. Attempting re-login...")
+                    login(page)
 
                 run_extraction_cycle(page)
-                print(f"\nCycle #{cycle_count} completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. Waiting for {extraction_interval_minutes} minutes before the next cycle...")
+                
+                logger.info(f"Cycle #{cycle_count} completed. Waiting {extraction_interval_minutes} minutes...")
                 time.sleep(extraction_interval_minutes * 60)
                 cycle_count += 1
 
         except KeyboardInterrupt:
-            print("\n[INFO] Script interrotto dall'utente. Uscita in corso...")
+            logger.info("Script interrupted by user. Exiting...")
         except Exception as e:
-            print(f"\n[FATAL ERROR] {e}")
-            page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "fatal_error_screenshot.png"))
+            logger.critical(f"FATAL ERROR: {e}")
+            page.screenshot(path=os.path.join(_ROOT_DIR, "errors", "fatal_error.png"))
         finally:
-            print("\nClosing browser...")
+            logger.info("Closing browser...")
             browser.close()
-
 
 if __name__ == "__main__":
     main()

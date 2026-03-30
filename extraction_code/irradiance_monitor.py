@@ -1,72 +1,95 @@
+import logging
 import time
 import pandas as pd
 
+logger = logging.getLogger(__name__)
+
+# Specific sensors list provided by user
+IRR_SENSORS = [
+    "JB-SM1_AL-1-DOWN", "JB-SM1_AL-1-UP", "JB-SM3_AL-3-DOWN", "JB-SM3_AL-3-UP",
+    "JB-SM3_GHI-3", "JB1_GHI-1", "JB1_IT-1-1", "JB1_IT-1-2", "JB1_POA-1",
+    "JB2_IT-2-1", "JB2_IT-2-2", "JB3_IT-3-1", "JB3_IT-3-2", "JB3_POA-3"
+]
 
 def extract_irradiance_data(page):
-    """Extract Irraggiamento data from the VCOM Evaluation dashboard."""
-    print("\n--- Extracting Irraggiamento Data ---")
+    """Extract Irraggiamento data for specific sensors."""
+    logger.info("--- Extracting Irraggiamento Data (Sensors) ---")
+    
+    # 1. Navigate to Irraggiamento
     page.locator('text="Irraggiamento"').first.click()
+    time.sleep(2)
 
-    # Click the "acceso" button for Valori in minuti if it's not active (when available)
+    # 2. Toggle Valori in minuti if possible
     try:
         page.wait_for_selector('button[title="acceso"]:visible', timeout=10000)
         acceso_btn = page.locator('button[title="acceso"]:visible').first
-
         if 'active' not in acceso_btn.get_attribute('class'):
-            print("Toggling 'Valori in minuti' to ACCESO...")
+            logger.info("Toggling 'Valori in minuti' to ACCESO...")
             acceso_btn.click()
-
-            # Dismiss "Valori minimi non disponibili" modal if it appears
             try:
-                page.wait_for_selector('button:has-text("Chiudi"):visible', timeout=12000)
-                print("Dismissing 'Valori minimi non disponibili' modal...")
+                page.wait_for_selector('button:has-text("Chiudi"):visible', timeout=5000)
                 page.locator('button:has-text("Chiudi"):visible').first.click()
-                time.sleep(2)
-            except Exception:
-                pass
-
+            except Exception: pass
             time.sleep(3)
-        else:
-            print("'Valori in minuti' is already ACCESO.")
-    except Exception as e:
-        print("Warning: could not toggle 'Valori in minuti' for Irraggiamento (maybe not available).", e)
-
-    # Refresh chart if button exists
-    try:
-        if page.locator('button:has-text("Aggiorna grafico")').is_visible(timeout=5000):
-            page.locator('button:has-text("Aggiorna grafico")').click()
     except Exception:
-        pass
+        logger.warning("Could not toggle 'Valori in minuti' for Irraggiamento.")
 
-    # Click the "Dati" tab
+    # 3. Refresh chart
+    try:
+        aggiorna_btn = page.locator('button:has-text("Aggiorna grafico"), button:has-text("Update chart")')
+        if aggiorna_btn.is_visible(timeout=3000):
+            aggiorna_btn.click()
+            time.sleep(2)
+    except Exception: pass
+
+    # 4. Click Dati tab
     page.wait_for_selector('text="Dati"', timeout=20000)
     page.locator('text="Dati"').last.click()
 
-    # Wait for the data table
+    # 5. Wait for table
     rows_locator = page.locator('#infotab-data table tbody tr')
     try:
         rows_locator.first.wait_for(state="visible", timeout=20000)
     except Exception:
-        print("No data rows found for Irraggiamento (possibly unsupported resolution). Returning empty DataFrame.")
+        logger.warning("No data rows found for Irraggiamento.")
         return pd.DataFrame()
 
-    # Extract headers
+    # 6. Extract columns and rows
     headers = page.locator('#infotab-data table thead tr th').all()
     header_texts = [h.inner_text().strip() for h in headers]
+    
+    # Filter columns to only include Ora and our target sensors
+    # (Sometimes headers include extra info, we try to match by sensor name)
+    valid_cols = []
+    col_indices = []
+    for i, h in enumerate(header_texts):
+        if h == "Ora" or any(s in h for s in IRR_SENSORS):
+            valid_cols.append(h)
+            col_indices.append(i)
 
-    # Extract rows
+    logger.info(f"Detected relevant Irradiance columns: {valid_cols}")
+
     rows = rows_locator.all()
-    print(f"Found {len(rows)} rows for Irraggiamento.")
-
     results = []
-    for idx, row in enumerate(rows):
-        col_texts = [text.strip() for text in row.locator('td').all_inner_texts()]
-        # Trim to header length
-        if len(col_texts) > len(header_texts):
-            col_texts = col_texts[:len(header_texts)]
-        results.append(col_texts)
-        if idx < 5:
-            print(f"Row {idx}: {col_texts}")
+    for row in rows:
+        cells = row.locator('td').all_inner_texts()
+        filtered_cells = [cells[i].strip() for i in col_indices if i < len(cells)]
+        
+        # Apply Italian number conversion
+        converted_cells = []
+        for cell in filtered_cells:
+            # Skip 'Ora'
+            if len(converted_cells) == 0: 
+                converted_cells.append(cell)
+                continue
+            try:
+                # Replace comma with dot and remove thousands separator
+                val = cell.replace('.', '').replace(',', '.')
+                converted_cells.append(float(val))
+            except ValueError:
+                converted_cells.append(cell)
+        
+        results.append(converted_cells)
 
-    df = pd.DataFrame(results, columns=header_texts)
+    df = pd.DataFrame(results, columns=valid_cols)
     return df

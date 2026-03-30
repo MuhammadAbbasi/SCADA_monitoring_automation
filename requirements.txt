@@ -1,6 +1,10 @@
 pandas
 numpy
-matplotlib
 openpyxl
-watchdog    
-streamlit  
+watchdog
+playwright
+fastapi
+uvicorn
+jinja2
+python-multipart
+supervisor
