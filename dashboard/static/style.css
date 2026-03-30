@@ -90,7 +90,8 @@ h2 { font-size: 1.4rem; margin-bottom: 1.5rem; }
 }
 
 .alert-item.severity-Critical { border-left-color: var(--danger-color); background: rgba(239, 68, 68, 0.05); }
-.alert-item.severity-High { border-left-color: var(--warning-color); }
+.alert-item.severity-High { border-left-color: var(--danger-color); }
+.alert-item.severity-Warning { border-left-color: var(--warning-color); background: rgba(245, 158, 11, 0.05); }
 .alert-item.severity-Medium { border-left-color: var(--primary-color); }
 
 .alert-main { font-weight: 600; }
@@ -120,10 +121,53 @@ td { padding: 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font-siz
 }
 
 .tag-Critical { background: rgba(239, 68, 68, 0.1); color: var(--danger-color); }
-.tag-High { background: rgba(245, 158, 11, 0.1); color: var(--warning-color); }
+.tag-High { background: rgba(239, 68, 68, 0.1); color: var(--danger-color); }
+.tag-Warning { background: rgba(245, 158, 11, 0.1); color: var(--warning-color); }
 .tag-Medium { background: rgba(59, 130, 246, 0.1); color: var(--primary-color); }
 .tag-Info { background: rgba(16, 185, 129, 0.1); color: var(--success-color); }
 
 @media (max-width: 768px) {
     header { flex-direction: column; align-items: flex-start; gap: 1rem; }
 }
+
+.ingestion-section { margin-bottom: 3rem; }
+.file-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+}
+.file-card {
+    background: var(--card-bg);
+    padding: 0.75rem 1rem;
+    border-radius: 0.5rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.file-label { font-size: 0.85rem; color: var(--text-secondary); }
+.file-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-left: 0.5rem;
+}
+.file-indicator.success { background-color: var(--success-color); box-shadow: 0 0 8px var(--success-color); }
+.file-indicator.pending { background-color: var(--warning-color); box-shadow: 0 0 8px var(--warning-color); position: relative; }
+.file-indicator.pending::after {
+    content: 'Awaiting';
+    position: absolute;
+    right: 1.5rem;
+    top: -4px;
+    font-size: 0.65rem;
+    color: var(--warning-color);
+    white-space: nowrap;
+    text-transform: uppercase;
+    font-weight: 800;
+}
+.loading {
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-top: 2px solid var(--primary-color);
+    animation: spin 1s linear infinite;
+}
+@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }

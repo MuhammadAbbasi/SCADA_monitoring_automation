@@ -54,7 +54,7 @@ def to_hours(t):
 def analyze_site(directory):
     logger.info("Starting forensic analysis of plant data...")
     
-    # 1. Load latest files
+    # 1. Load latest files and track status
     file_patterns = {
         'Potenza_AC': "*Potenza_AC_*.xlsx",
         'PR': "*PR_*.xlsx",
@@ -65,142 +65,180 @@ def analyze_site(directory):
     }
 
     file_paths = {}
+    file_statuses = {}
+    dataframes = {k: pd.DataFrame() for k in file_patterns.keys()}
+
     for key, pattern in file_patterns.items():
         matches = glob.glob(os.path.join(directory, pattern))
         if matches:
             file_paths[key] = max(matches, key=os.path.getmtime)
+            try:
+                dataframes[key] = clean_data(pd.read_excel(file_paths[key]))
+                file_statuses[key] = {"status": "success", "timestamp": datetime.fromtimestamp(os.path.getmtime(file_paths[key])).strftime('%H:%M')}
+            except Exception as e:
+                logger.error(f"Error reading Excel file {key}: {e}")
+                file_statuses[key] = {"status": "pending", "data": None}
+        else:
+            file_statuses[key] = {"status": "pending", "data": None}
 
-    if len(file_paths) < 6:
-        logger.warning(f"Missing files for complete analysis. Found {len(file_paths)}/6. Skipping cycle.")
-        return
+    # 3. Standardize Time and Merge (if at least Potenza_AC exists)
+    pot_df = dataframes['Potenza_AC']
+    if pot_df.empty:
+        logger.warning("Potenza_AC missing. Cannot perform full analysis.")
+        # Proceed with empty analysis structure
+        dashboard_data = {
+            "macro_health": {"total_inverters": 0, "online": 0, "tripped": 0, "comms_lost": 0},
+            "anomalies": [],
+            "file_statuses": file_statuses
+        }
+    else:
+        # Standardize timestamps for all available dataframes
+        for k, df in dataframes.items():
+            if not df.empty and 'Ora' in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df['Ora']):
+                    df['Ora'] = df['Ora'].dt.strftime('%H:%M')
+                df['Ora_Numeric'] = df['Ora'].apply(to_hours)
 
-    # 2. Read and Clean
-    try:
-        pot_df = clean_data(pd.read_excel(file_paths['Potenza_AC']))
-        res_df = clean_data(pd.read_excel(file_paths['Resistenza_Isolamento']))
-        temp_df = clean_data(pd.read_excel(file_paths['Temperatura']))
-        pr_df = clean_data(pd.read_excel(file_paths['PR']))
-        dc_df = clean_data(pd.read_excel(file_paths['Corrente_DC']))
-        irr_df = clean_data(pd.read_excel(file_paths['Irraggiamento']))
-    except Exception as e:
-        logger.error(f"Error reading Excel files: {e}")
-        return
+        # Master merge on 'Ora' using Potenza_AC as reference
+        merged = pot_df[['Ora', 'Ora_Numeric']].copy()
+        inv_ids = [c for c in pot_df.columns if 'INV' in c and 'Ora' not in c]
+        
+        # Merge available datasets
+        suffix_map = {
+            'Resistenza_Isolamento': '_RES', 
+            'Temperatura': '_TEMP', 
+            'Corrente_DC': '_DC',
+            'PR': '_PR'
+        }
+        for key in suffix_map.keys():
+            df = dataframes[key]
+            if not df.empty:
+                cols_to_merge = [c for c in df.columns if 'INV' in c] + ['Ora']
+                merged = merged.merge(df[cols_to_merge], on='Ora', how='left', suffixes=('', suffix_map[key]))
 
-    # 3. Standardize Time and Merge
-    for df in [pot_df, res_df, temp_df, dc_df, irr_df]:
-        if not df.empty and 'Ora' in df.columns:
-            if pd.api.types.is_datetime64_any_dtype(df['Ora']):
-                df['Ora'] = df['Ora'].dt.strftime('%H:%M')
-            df['Ora_Numeric'] = df['Ora'].apply(to_hours)
+        # Handle Irradiance separately
+        irr_df = dataframes['Irraggiamento']
+        if not irr_df.empty:
+            irr_cols = [c for c in irr_df.columns if c != 'Ora' and c != 'Ora_Numeric']
+            merged = merged.merge(irr_df[irr_cols + ['Ora']], on='Ora', how='left')
 
-    # Master merge on 'Ora'
-    merged = pot_df[['Ora', 'Ora_Numeric']].copy()
+        # --- FULL FORENSIC SCAN (Incident Detective) ---
+        all_incidents = []
+        
+        # Calculate Site-wide Production (Median is more robust to outliers)
+        active_production = merged[[c for c in merged.columns if (c in inv_ids or '_POT' in c)]]
+        site_production = active_production.median(axis=1) if not pot_df.empty else pd.Series([0]*len(merged))
+        
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        total_invs = len(inv_ids)
+
+        for idx, inv in enumerate(inv_ids):
+            logger.info(f"Scanning Inverter {idx+1}/{total_invs}: {inv}...")
+            pot = merged[inv] if inv in merged.columns else merged.get(f"{inv}_POT", pd.Series([np.nan]*len(merged)))
+            res = merged.get(f"{inv}_RES", pd.Series([np.nan]*len(merged)))
+            temp = merged.get(f"{inv}_TEMP", pd.Series([np.nan]*len(merged)))
+            pr_data = merged.get(f"{inv}_PR", pd.Series([np.nan]*len(merged)))
+            
+            # Pre-calculate DC columns for this inverter
+            dc_cols = [c for c in merged.columns if (inv in c and '_DC' in c)]
+            # If we have DC strings, get their values as a matrix for fast access
+            dc_matrix = merged[dc_cols].values if dc_cols else np.array([[]]*len(merged))
+            
+            # Detect Events throughout the entire dataframe
+            # Using zip avoids the heavy overhead of iloc[i] in a tight loop
+            for i, (row_time, row_h, p_val, r_val, t_val, pr_val, s_prod, dc_vals) in enumerate(zip(
+                merged['Ora'], merged['Ora_Numeric'], pot, res, temp, pr_data, site_production, dc_matrix
+            )):
+                
+                incident = None
+
+                # Rule 1: Performance Ratio < 85% (Error)
+                if not pd.isna(pr_val) and (pr_val < 0.85 or (pr_val < 85 and pr_val > 1)) and row_h >= 9 and row_h <= 17:
+                    display_pr = pr_val if pr_val < 100 else pr_val/100
+                    incident = {"type": "Low Performance Ratio", "severity": "Critical", "details": f"PR: {round(display_pr, 2)}%"}
+
+                # Rule 2: Inverter Temperature > 40°C (Warning)
+                elif not pd.isna(t_val) and t_val > 40:
+                    incident = {"type": "High Operating Temp", "severity": "Warning", "details": f"Measured: {t_val}°C"}
+
+                # Rule 3: Low DC current in any string (Error)
+                elif dc_cols and p_val > 500: # only check if inverter is producing
+                    for col_idx, dcv in enumerate(dc_vals):
+                        if not pd.isna(dcv) and dcv < 0.2: # Simple threshold for "low" DC current
+                            incident = {"type": "DC String Failure", "severity": "Critical", "details": f"Low current on {dc_cols[col_idx]}"}
+                            break
+
+                # Rule 4: AC Power difference > 3% (Error)
+                if not incident and s_prod > 5000: # Site is producing significantly
+                    p_diff = abs(p_val - s_prod) / s_prod if s_prod > 0 else 0
+                    if p_diff > 0.03:
+                        incident = {"type": "Power Yield Deviation", "severity": "Critical", "details": f"Deviation: {round(p_diff*100,1)}% from site avg"}
+
+                # Generic System rules (Comm/Trip)
+                if not incident:
+                    if pd.isna(p_val) and row_h >= 7 and row_h <= 19:
+                        incident = {"type": "Communication Problem", "severity": "High", "details": "No data stream."}
+                    elif p_val == 0 and s_prod > 2000 and row_h >= 7 and row_h <= 19:
+                        incident = {"type": "Inverter Trip", "severity": "Critical", "details": "Zero production detected."}
+
+                if incident:
+                    # Append unique incidents
+                    incident.update({"timestamp": f"{today_str} {row_time}", "inverter": inv})
+                    all_incidents.append(incident)
+
+        # De-duplicate: If the same inverter has the same error type for consecutive time slots,
+        # we only keep the first one to avoid alert fatigue.
+        unique_anomalies = []
+        if all_incidents:
+            all_incidents.sort(key=lambda x: (x['inverter'], x['type'], x['timestamp']))
+            unique_anomalies.append(all_incidents[0])
+            for k in range(1, len(all_incidents)):
+                # If it's a different inverter or different problem, it's unique
+                if (all_incidents[k]['inverter'] != all_incidents[k-1]['inverter'] or 
+                    all_incidents[k]['type'] != all_incidents[k-1]['type']):
+                    unique_anomalies.append(all_incidents[k])
+                else:
+                    # If same inverter and type, check time gap (Simplified: keep only if gap > 1 hour)
+                    try:
+                        t1 = datetime.strptime(all_incidents[k-1]['timestamp'], '%Y-%m-%d %H:%M')
+                        t2 = datetime.strptime(all_incidents[k]['timestamp'], '%Y-%m-%d %H:%M')
+                        if (t2 - t1).total_seconds() > 3600:
+                            unique_anomalies.append(all_incidents[k])
+                    except: pass
+
+        dashboard_data = {
+            "macro_health": {"total_inverters": len(inv_ids), "online": 0, "tripped": 0, "comms_lost": 0},
+            "anomalies": unique_anomalies[-50:],
+            "file_statuses": file_statuses
+        }
+        dashboard_data["macro_health"]["online"] = int((pot_df.iloc[-1][inv_ids] > 0).sum()) if not pot_df.empty else 0
+        dashboard_data["macro_health"]["tripped"] = int((pot_df.iloc[-1][inv_ids] == 0).sum()) if not pot_df.empty else 0
+        dashboard_data["macro_health"]["comms_lost"] = int(pot_df.iloc[-1][inv_ids].isna().sum()) if not pot_df.empty else 0
+
+    # --- SAVE TIME-SERIES DAILY JSON ---
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    daily_json_path = os.path.join(directory, f"dashboard_data_{today_str}.json")
     
-    # Identify Inverters (assuming columns like 'INV TX1-01', etc.)
-    inv_ids = [c for c in pot_df.columns if 'INV' in c and 'Ora' not in c]
-    
-    # Merge all datasets
-    suffixes = {'POT': pot_df, 'RES': res_df, 'TEMP': temp_df, 'DC': dc_df}
-    for suffix, df in suffixes.items():
-        cols_to_merge = [c for c in df.columns if 'INV' in c] + ['Ora']
-        merged = merged.merge(df[cols_to_merge], on='Ora', how='left', suffixes=('', f'_{suffix}'))
-    
-    # Handle Irradiance separately (sensor names are specific)
-    irr_cols = [c for c in irr_df.columns if c != 'Ora' and c != 'Ora_Numeric']
-    merged = merged.merge(irr_df[irr_cols + ['Ora']], on='Ora', how='left')
+    current_time_key = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    time_series_data = {}
 
-    # Core Analysis Logic
-    dashboard_path = os.path.join(directory, 'dashboard_data.json')
-    historical_alarms = []
-    if os.path.exists(dashboard_path):
+    if os.path.exists(daily_json_path):
         try:
-            with open(dashboard_path, 'r') as f:
-                historical_alarms = json.load(f).get('historical_alarms', [])
-        except Exception: pass
+            with open(daily_json_path, 'r') as f:
+                time_series_data = json.load(f)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.error(f"Corrupted JSON detected in {daily_json_path}. Creating new file. Error: {e}")
+            time_series_data = {}
 
-    dashboard_data = {
-        "last_updated": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        "macro_health": {
-            "total_inverters": len(inv_ids),
-            "online": 0,
-            "tripped": 0,
-            "comms_lost": 0
-        },
-        "anomalies": [],
-        "historical_alarms": historical_alarms
-    }
+    time_series_data[current_time_key] = dashboard_data
 
-    # Reference metrics for Site
-    site_production = merged[[c for c in merged.columns if '_POT' in c]].mean(axis=1)
-    # Use JB1_POA-1 as primary reference for Irradiance
-    poa_ref = merged.get('JB1_POA-1', merged.get('JB3_POA-3', site_production * 0.05)) 
-
-    now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    for inv in inv_ids:
-        pot = merged[f"{inv}_POT"] if f"{inv}_POT" in merged.columns else merged[inv]
-        res = merged[f"{inv}_RES"] if f"{inv}_RES" in merged.columns else pd.Series([np.nan]*len(merged))
-        temp = merged[f"{inv}_TEMP"] if f"{inv}_TEMP" in merged.columns else pd.Series([np.nan]*len(merged))
-        
-        # 1. Comms Loss Check (> 20 mins of NaN during production hours)
-        daylight = merged[(merged['Ora_Numeric'] >= 7.0) & (merged['Ora_Numeric'] <= 18.5)]
-        nan_streak = pot.isnull().rolling(window=4).sum().max() # 4 slots * 5min approx
-        if nan_streak >= 4:
-            dashboard_data["macro_health"]["comms_lost"] += 1
-            alarm = {"timestamp": now_ts, "inverter": inv, "type": "Communication Problem", "severity": "Medium", "details": "No data received for > 20 minutes."}
-            dashboard_data["anomalies"].append(alarm)
-            continue
-
-        # 2. Trip / 0W Check
-        latest_pot = pot.iloc[-1]
-        if latest_pot == 0 and site_production.iloc[-1] > 1000:
-            dashboard_data["macro_health"]["tripped"] += 1
-            
-            # Check reason
-            last_res = res.dropna().iloc[-1] if not res.dropna().empty else 1000
-            last_temp = temp.dropna().iloc[-1] if not temp.dropna().empty else 40
-            
-            reason = "Unknown Trip"
-            if last_res < 50: reason = f"Insulation Fault ({last_res} kOhm)"
-            elif last_temp > 60: reason = f"Thermal Trip ({last_temp} °C)"
-            
-            alarm = {"timestamp": now_ts, "inverter": inv, "type": "Inverter Trip", "severity": "Critical", "details": reason}
-            dashboard_data["anomalies"].append(alarm)
-            continue
-        
-        dashboard_data["macro_health"]["online"] += 1
-
-        # 3. Thermal Anomalies
-        if temp.max() > 60:
-            avg_irr = poa_ref.iloc[-5:].mean()
-            if avg_irr > 600: # High production environment
-                alarm = {"timestamp": now_ts, "inverter": inv, "type": "Thermal Derating", "severity": "Info", "details": "Normal behavior under high irradiance."}
-            else:
-                alarm = {"timestamp": now_ts, "inverter": inv, "type": "Thermal Problem", "severity": "High", "details": "High temp despite low irradiance. Possible Fan Failure."}
-            dashboard_data["anomalies"].append(alarm)
-
-        # 4. Insulation Resistance (Time-gated)
-        if res.iloc[-1] < 50:
-            current_hour = datetime.now().hour
-            if current_hour >= 9:
-                alarm = {"timestamp": now_ts, "inverter": inv, "type": "Low Insulation Resistance", "severity": "High", "details": f"Persistent low resistance: {res.iloc[-1]} kOhm"}
-                dashboard_data["anomalies"].append(alarm)
-
-        # 5. DC String Comparison
-        # (This would require more granular DC entry data if extracted)
-        # For now, we flag if DC Current is disproportionately low compared to AC Power site-wide
-        if (pot.iloc[-1] < site_production.iloc[-1] * 0.7) and (poa_ref.iloc[-1] > 200):
-            alarm = {"timestamp": now_ts, "inverter": inv, "type": "Low Power / String Fault", "severity": "Medium", "details": "Output significantly below site average."}
-            dashboard_data["anomalies"].append(alarm)
-
-    # Sync historical alarms
-    dashboard_data["historical_alarms"].extend(dashboard_data["anomalies"])
-    dashboard_data["historical_alarms"] = dashboard_data["historical_alarms"][-200:] # Keep last 200
-
-    # Save to JSON
-    with open(dashboard_path, 'w') as f:
-        json.dump(dashboard_data, f, indent=4)
-    logger.info("Forensic analysis complete. Dashboard JSON updated.")
+    # Save back
+    try:
+        with open(daily_json_path, 'w') as f:
+            json.dump(time_series_data, f, indent=4)
+        logger.info(f"Analysis saved to daily JSON: {daily_json_path}")
+    except Exception as e:
+        logger.error(f"Failed to write JSON: {e}")
 
 class VCOMHandler(FileSystemEventHandler):
     def __init__(self, directory):
@@ -209,10 +247,9 @@ class VCOMHandler(FileSystemEventHandler):
 
     def on_modified(self, event):
         if event.src_path.endswith('.xlsx'):
-            # Debounce: only run if 30 seconds passed since last trigger
             if time.time() - self.last_run > 30:
                 self.last_run = time.time()
-                time.sleep(5) # Wait for file lock release
+                time.sleep(5)
                 analyze_site(self.directory)
 
 if __name__ == "__main__":

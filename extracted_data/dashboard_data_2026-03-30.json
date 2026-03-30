@@ -1,0 +1,72 @@
+{
+    "2026-03-30 16:07:30": {
+        "macro_health": {
+            "total_inverters": 36,
+            "online": 36,
+            "tripped": 0,
+            "comms_lost": 0
+        },
+        "anomalies": [],
+        "file_statuses": {
+            "Potenza_AC": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "PR": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Resistenza_Isolamento": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Temperatura": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Corrente_DC": {
+                "status": "success",
+                "timestamp": "15:43"
+            },
+            "Irraggiamento": {
+                "status": "success",
+                "timestamp": "15:43"
+            }
+        }
+    },
+    "2026-03-30 16:08:03": {
+        "macro_health": {
+            "total_inverters": 36,
+            "online": 36,
+            "tripped": 0,
+            "comms_lost": 0
+        },
+        "anomalies": [],
+        "file_statuses": {
+            "Potenza_AC": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "PR": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Resistenza_Isolamento": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Temperatura": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Corrente_DC": {
+                "status": "success",
+                "timestamp": "16:07"
+            },
+            "Irraggiamento": {
+                "status": "success",
+                "timestamp": "16:07"
+            }
+        }
+    }
+}

@@ -1,16 +1,36 @@
 async function updateDashboard() {
     try {
         const response = await fetch('/api/status');
-        const data = await response.json();
+        const timeSeriesData = await response.json();
+
+        const timestamps = Object.keys(timeSeriesData).sort();
+        if (timestamps.length === 0) {
+            console.warn("No data available for today.");
+            return;
+        }
+
+        const latestTs = timestamps[timestamps.length - 1];
+        const data = timeSeriesData[latestTs];
 
         // Update Macro Health
         document.getElementById('total-inv').textContent = data.macro_health.total_inverters || 0;
         document.getElementById('online-inv').textContent = data.macro_health.online || 0;
         document.getElementById('tripped-inv').textContent = data.macro_health.tripped || 0;
         document.getElementById('comms-lost').textContent = data.macro_health.comms_lost || 0;
-        document.getElementById('last-sync').textContent = `Last Sync: ${data.last_updated || '--:--'}`;
+        document.getElementById('last-sync').textContent = `Last Sync: ${latestTs.split(' ')[1]}`;
 
-        // Update Active Alerts
+        // Update File Ingestion Status
+        if (data.file_statuses) {
+            Object.entries(data.file_statuses).forEach(([fileKey, statusObj]) => {
+                const card = document.getElementById(`file-${fileKey}`);
+                if (card) {
+                    const indicator = card.querySelector('.file-indicator');
+                    indicator.className = `file-indicator ${statusObj.status}`;
+                }
+            });
+        }
+
+        // Update Active Alerts (from current timestamp)
         const alertsContainer = document.getElementById('alerts-container');
         if (data.anomalies && data.anomalies.length > 0) {
             alertsContainer.innerHTML = data.anomalies.map(alert => `
@@ -25,12 +45,19 @@ async function updateDashboard() {
             alertsContainer.innerHTML = '<p class="placeholder-text" style="color: var(--success-color)">No active anomalies. Plant operating normally.</p>';
         }
 
-        // Update History
+        // Update History (Aggregate all anomalies from the whole day)
         const historyBody = document.getElementById('history-body');
-        if (data.historical_alarms && data.historical_alarms.length > 0) {
-            historyBody.innerHTML = data.historical_alarms.reverse().slice(0, 50).map(alarm => `
+        let allAnomalies = [];
+        timestamps.forEach(ts => {
+            if (timeSeriesData[ts].anomalies) {
+                allAnomalies = allAnomalies.concat(timeSeriesData[ts].anomalies);
+            }
+        });
+
+        if (allAnomalies.length > 0) {
+            historyBody.innerHTML = allAnomalies.reverse().slice(0, 100).map(alarm => `
                 <tr>
-                    <td>${alarm.timestamp}</td>
+                    <td>${alarm.timestamp.split(' ')[1]}</td>
                     <td>${alarm.inverter}</td>
                     <td>${alarm.type}</td>
                     <td><span class="severity-tag tag-${alarm.severity}">${alarm.severity}</span></td>
