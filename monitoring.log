@@ -723,3 +723,12 @@ Call log:
 2026-03-30 16:49:57,924 [INFO] --- Extracting Temperature Data ---
 2026-03-30 16:50:03,703 [INFO] Temperature Headers: ['Ora', 'Temperatura inverter (INV TX1-01) [°C]', 'Temperatura inverter (INV TX1-02) [°C]', 'Temperatura inverter (INV TX1-03) [°C]', 'Temperatura inverter (INV TX1-04) [°C]', 'Temperatura inverter (INV TX1-05) [°C]', 'Temperatura inverter (INV TX1-06) [°C]', 'Temperatura inverter (INV TX1-07) [°C]', 'Temperatura inverter (INV TX1-08) [°C]', 'Temperatura inverter (INV TX1-09) [°C]', 'Temperatura inverter (INV TX1-10) [°C]', 'Temperatura inverter (INV TX1-11) [°C]', 'Temperatura inverter (INV TX1-12) [°C]', 'Temperatura inverter (INV TX2-01) [°C]', 'Temperatura inverter (INV TX2-02) [°C]', 'Temperatura inverter (INV TX2-03) [°C]', 'Temperatura inverter (INV TX2-04) [°C]', 'Temperatura inverter (INV TX2-05) [°C]', 'Temperatura inverter (INV TX2-06) [°C]', 'Temperatura inverter (INV TX2-07) [°C]', 'Temperatura inverter (INV TX2-08) [°C]', 'Temperatura inverter (INV TX2-09) [°C]', 'Temperatura inverter (INV TX2-10) [°C]', 'Temperatura inverter (INV TX2-11) [°C]', 'Temperatura inverter (INV TX2-12) [°C]', 'Temperatura inverter (INV TX3-01) [°C]', 'Temperatura inverter (INV TX3-02) [°C]', 'Temperatura inverter (INV TX3-03) [°C]', 'Temperatura inverter (INV TX3-04) [°C]', 'Temperatura inverter (INV TX3-05) [°C]', 'Temperatura inverter (INV TX3-06) [°C]', 'Temperatura inverter (INV TX3-07) [°C]', 'Temperatura inverter (INV TX3-08) [°C]', 'Temperatura inverter (INV TX3-09) [°C]', 'Temperatura inverter (INV TX3-10) [°C]', 'Temperatura inverter (INV TX3-11) [°C]', 'Temperatura inverter (INV TX3-12) [°C]']
 2026-03-30 16:50:28,205 [INFO] --- Extracting Corrente DC Data ---
+2026-03-30 16:52:11,086 [ERROR] Attempt 1 failed for Corrente DC: Locator.inner_text: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#infotab-data table thead tr th").nth(164)
+
+2026-03-30 16:52:41,167 [CRITICAL] FATAL ERROR: Page.screenshot: Timeout 30000ms exceeded.
+Call log:
+  - taking page screenshot
+
+2026-03-30 16:52:55,297 [INFO] Closing browser...

@@ -12,3 +12,5 @@ dashoard_data.json
 implementation_plan.md
 analysis.log
 docker*
+*claude*
+*.log
