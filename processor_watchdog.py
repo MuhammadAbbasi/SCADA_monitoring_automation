@@ -1,391 +1,411 @@
+"""
+processor_watchdog_final.py — VCOM Forensic Analysis (Memory-Efficient)
+
+Analyzes extracted data without massive merges:
+- Potenza_AC: Master time series (23,040 rows per day)
+- Other metrics: Loaded as-needed for rule evaluation
+- No full merges - lookups and comparisons only
+
+Generates JSON snapshots (health flags) + optional CSV audit trails.
+"""
+
+import json
+import logging
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
-import time
-import json
-import glob
-import os
-import logging
-from datetime import datetime
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
-# --- SETUP LOGGING ---
+# ---------------------------------------------------------------------------
+# Paths & Logging
+# ---------------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "extracted_data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_PATH = ROOT / "watchdog.log"
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
+    format="%(asctime)s [WATCHDOG] %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler("analysis.log"),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_PATH, encoding="utf-8"),
+    ],
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("watchdog_final")
 
-# --- CORE PROCESSING LOGIC ---
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
-def clean_data(df):
-    """Ensure data is numeric and handle common extraction artifacts."""
-    if df is None or df.empty:
-        return pd.DataFrame()
-    
-    if 'Timestamp Fetch' in df.columns:
-        df = df.drop(columns=['Timestamp Fetch'])
-        
-    for col in df.columns:
-        if col == 'Ora' or col == 'DateTime':
-            continue
-        if df[col].dtype == object:
-            # Handle potential string conversions if not already done in extraction
-            val = df[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-            df[col] = pd.to_numeric(val, errors='coerce')
-    return df
+INVERTER_IDS = [
+    "TX1-01", "TX1-02", "TX1-03", "TX1-04", "TX1-05", "TX1-06",
+    "TX1-07", "TX1-08", "TX1-09", "TX1-10", "TX1-11", "TX1-12",
+    "TX2-01", "TX2-02", "TX2-03", "TX2-04", "TX2-05", "TX2-06",
+    "TX2-07", "TX2-08", "TX2-09", "TX2-10", "TX2-11", "TX2-12",
+    "TX3-01", "TX3-02", "TX3-03", "TX3-04", "TX3-05", "TX3-06",
+    "TX3-07", "TX3-08", "TX3-09", "TX3-10", "TX3-11", "TX3-12",
+]
 
-def to_hours(t):
-    """Convert HH:MM or HH:MM:SS to float hours."""
-    if isinstance(t, (int, float)):
-        return float(t)
+# Thresholds
+PR_THRESHOLD = 85.0
+TEMP_CRITICAL = 45.0
+TEMP_WARNING = 40.0
+AC_HEALTHY_MIN = 5000  # AC > 5kW = healthy during daylight
+DAYLIGHT_START = 7.0
+DAYLIGHT_END = 19.0
+
+
+# ---------------------------------------------------------------------------
+# Data Loading
+# ---------------------------------------------------------------------------
+
+def excel_to_csv(excel_path: Path, csv_path: Path) -> bool:
+    """Convert Excel to CSV, return True if successful."""
     try:
-        parts = str(t).split(':')
-        if len(parts) >= 2:
-            return int(parts[0]) + int(parts[1])/60
-        return np.nan
-    except Exception:
-        return np.nan
+        df = pd.read_excel(str(excel_path))
+        df.to_csv(str(csv_path), index=False)
+        logger.info(f"Converted {excel_path.name} -> {csv_path.name}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to convert {excel_path.name}: {e}")
+        return False
 
-def cleanup_old_daily_jsons(directory, days=7):
-    """Delete daily dashboard JSON snapshots older than `days` days to prevent unbounded growth."""
-    today = datetime.now().date()
-    for f in glob.glob(os.path.join(directory, "dashboard_data_????-??-??.json")):
-        basename = os.path.basename(f)
-        date_str = basename.replace("dashboard_data_", "").replace(".json", "")
+
+def load_metric(date_str: str, metric_prefix: str) -> pd.DataFrame:
+    """Load metric from CSV or Excel."""
+    csv_path = DATA_DIR / f"{metric_prefix}_{date_str}.csv"
+    excel_path = DATA_DIR / f"{metric_prefix}_{date_str}.xlsx"
+
+    # Try CSV first
+    if csv_path.exists():
         try:
-            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            if (today - file_date).days > days:
-                os.remove(f)
-                logger.info(f"Cleaned up old daily JSON (>{days}d): {f}")
-        except ValueError:
+            return pd.read_csv(str(csv_path))
+        except Exception:
             pass
 
-def compute_health_flags(merged, inv_ids):
+    # Try Excel
+    if excel_path.exists():
+        try:
+            if excel_to_csv(excel_path, csv_path):
+                return pd.read_csv(str(csv_path))
+        except Exception:
+            pass
+
+    logger.warning(f"{metric_prefix}_{date_str} not found")
+    return None
+
+
+def normalize_pr(val):
+    """Convert PR to 0-100% scale."""
+    if pd.isna(val):
+        return None
+    return val if val > 1.5 else val * 100
+
+
+# ---------------------------------------------------------------------------
+# Health Computation (from latest data)
+# ---------------------------------------------------------------------------
+
+def compute_latest_health(date_str: str, ac_df: pd.DataFrame, temp_df: pd.DataFrame,
+                         dc_df: pd.DataFrame, pr_df: pd.DataFrame) -> dict:
     """
-    Evaluate four health conditions for every inverter using the latest row of
-    the merged DataFrame and return a per-inverter colour-coded status dict.
-
-    Flags returned per inverter
-    ---------------------------
-    pr          : "green" | "yellow" | "red" | "grey"  (grey = no data)
-    temp        : "green" | "yellow" | "red" | "grey"
-    dc_current  : "green" | "red"   | "grey"           (relative to site median)
-    ac_power    : "green" | "red"   | "grey"           (relative to site median)
-    overall_status: worst non-grey flag across all four; "grey" if all grey
-
-    Night-time / zero-median guard
-    -------------------------------
-    If the site AC or DC median is 0 or NaN (plant off at night), the relative
-    checks are skipped and return "grey" instead of false reds.
+    Compute health flags from the latest available NON-NAN values in each metric file.
     """
-    if merged.empty or not inv_ids:
-        return {}
+    inverter_health = {}
 
-    latest = merged.iloc[-1]
+    # Get latest PR values
+    pr_latest = {}
+    if pr_df is not None:
+        pr_df_clean = pr_df.copy()
+        pr_df_clean["PR"] = pr_df_clean["PR"].apply(normalize_pr)
+        for inv_id in INVERTER_IDS:
+            rows = pr_df_clean[pr_df_clean["Inverter"] == f"INV {inv_id}"]
+            if len(rows) > 0:
+                pr_latest[inv_id] = rows.iloc[-1]["PR"]
 
-    # ── Site-wide medians (used for relative checks) ──────────────────────────
-    # AC Power: one column per inverter, named directly as the inverter ID
-    ac_series = pd.to_numeric(
-        pd.Series([latest.get(inv, np.nan) for inv in inv_ids]), errors='coerce'
-    )
-    site_ac_median = float(ac_series.median()) if ac_series.notna().any() else np.nan
+    # Find latest AC row with valid data (not all NaN)
+    ac_row = None
+    ora = 0
+    if ac_df is not None and len(ac_df) > 0:
+        # Find last row that has at least some non-NaN AC values
+        for idx in range(len(ac_df) - 1, -1, -1):
+            row = ac_df.iloc[idx]
+            ac_cols = [c for c in ac_df.columns if "Potenza AC" in c]
+            ac_values = [row.get(c) for c in ac_cols]
+            non_nan_count = sum(1 for v in ac_values if v is not None and not pd.isna(v))
+            if non_nan_count > 30:  # At least 30 inverters have valid data
+                ac_row = row
+                ora = row.get("Ora", 0)
+                logger.info(f"Found latest valid AC row at index {idx} (Ora={ora}, {non_nan_count} valid values)")
+                break
 
-    # DC Current: mean across all string columns per inverter → site median of those means
-    inv_dc_means = {}
-    for inv in inv_ids:
-        dc_cols = [c for c in merged.columns if inv in c and '_DC' in c]
-        if dc_cols:
-            inv_dc_means[inv] = float(
-                pd.to_numeric(latest[dc_cols], errors='coerce').mean()
-            )
+        if ac_row is None:
+            # Fallback to last row even if NaN
+            ac_row = ac_df.iloc[-1]
+            ora = ac_row.get("Ora", 0)
+
+    # Get latest temp and DC rows with valid data
+    temp_row = None
+    if temp_df is not None and len(temp_df) > 0:
+        for idx in range(len(temp_df) - 1, -1, -1):
+            row = temp_df.iloc[idx]
+            temp_cols = [c for c in temp_df.columns if "Temperatura" in c]
+            temp_values = [row.get(c) for c in temp_cols]
+            non_nan_count = sum(1 for v in temp_values if v is not None and not pd.isna(v))
+            if non_nan_count > 30:
+                temp_row = row
+                break
+        if temp_row is None and len(temp_df) > 0:
+            temp_row = temp_df.iloc[-1]
+
+    dc_row = None
+    if dc_df is not None and len(dc_df) > 0:
+        for idx in range(len(dc_df) - 1, -1, -1):
+            row = dc_df.iloc[idx]
+            dc_cols = [c for c in dc_df.columns if "Corrente DC" in c]
+            dc_values = [row.get(c) for c in dc_cols]
+            non_nan_count = sum(1 for v in dc_values if v is not None and not pd.isna(v))
+            if non_nan_count > 400:  # At least 400 MPPT channels have valid data
+                dc_row = row
+                break
+        if dc_row is None and len(dc_df) > 0:
+            dc_row = dc_df.iloc[-1]
+
+    # Compute health for each inverter
+    for inv_id in INVERTER_IDS:
+        inv_label = f"INV {inv_id}"
+        health = {}
+
+        # PR LED
+        pr_val = pr_latest.get(inv_id)
+        if pr_val is None:
+            health["pr"] = "grey"
+        elif pr_val >= PR_THRESHOLD:
+            health["pr"] = "green"
+        elif pr_val >= (PR_THRESHOLD - 10):
+            health["pr"] = "yellow"
         else:
-            inv_dc_means[inv] = np.nan
-    dc_mean_series = pd.Series(list(inv_dc_means.values()), dtype=float)
-    site_dc_median = float(dc_mean_series.median()) if dc_mean_series.notna().any() else np.nan
+            health["pr"] = "red"
 
-    # ── Per-inverter flag evaluation ───────────────────────────────────────────
-    COLOR_RANK = {"red": 2, "yellow": 1, "green": 0, "grey": -1}
-    health = {}
+        # Temperature LED
+        temp_col = f"Temperatura inverter (INV {inv_id}) [°C]"
+        temp_val = None
+        if temp_row is not None and temp_col in temp_row.index:
+            temp_val = temp_row[temp_col]
 
-    for inv in inv_ids:
-        flags = {}
-
-        # 1. Performance Ratio ─────────────────────────────────────────────────
-        pr_raw = latest.get(f"{inv}_PR", np.nan)
-        if pd.isna(pr_raw):
-            flags["pr"] = "grey"
+        if temp_val is None or pd.isna(temp_val):
+            health["temp"] = "grey"
+        elif temp_val > TEMP_CRITICAL:
+            health["temp"] = "red"
+        elif temp_val > TEMP_WARNING:
+            health["temp"] = "yellow"
         else:
-            # Normalise: VCOM can return 0–1 or 0–100
-            pr = float(pr_raw) / 100.0 if float(pr_raw) > 1 else float(pr_raw)
-            if pr >= 0.85:
-                flags["pr"] = "green"
-            elif pr >= 0.75:
-                flags["pr"] = "yellow"
+            health["temp"] = "green"
+
+        # DC Current LED (average of all MPPTs for this inverter)
+        # Thresholds adjusted for real-world conditions (late afternoon DC ~1-2A/MPPT is normal)
+        dc_values = []
+        if dc_row is not None:
+            for mppt in range(1, 13):  # 12 MPPTs per inverter
+                dc_col = f"Corrente DC MPPT {mppt} (INV {inv_id}) [A]"
+                if dc_col in dc_row.index:
+                    val = dc_row[dc_col]
+                    if val is not None and not pd.isna(val):
+                        dc_values.append(val)
+
+        if dc_values:
+            avg_dc = np.mean(dc_values)
+            # Contextualize to time of day: early morning/evening < afternoon
+            if DAYLIGHT_START <= ora <= 12:  # Morning ramp-up
+                dc_threshold_green = 10  # Morning: expect higher current
+                dc_threshold_yellow = 2
+            elif 12 < ora <= DAYLIGHT_END:  # Afternoon decline
+                dc_threshold_green = 5  # Afternoon: lower thresholds
+                dc_threshold_yellow = 0.5
+            else:  # Off-hours
+                dc_threshold_green = 0.1
+                dc_threshold_yellow = 0
+
+            if avg_dc >= dc_threshold_green:
+                health["dc_current"] = "green"
+            elif avg_dc >= dc_threshold_yellow:
+                health["dc_current"] = "yellow"
+            elif avg_dc > 0:
+                health["dc_current"] = "red"
             else:
-                flags["pr"] = "red"
-
-        # 2. Inverter Temperature ──────────────────────────────────────────────
-        temp_raw = latest.get(f"{inv}_TEMP", np.nan)
-        if pd.isna(temp_raw):
-            flags["temp"] = "grey"
+                health["dc_current"] = "grey"
         else:
-            t = float(temp_raw)
-            if t <= 40:
-                flags["temp"] = "green"
-            elif t <= 45:
-                flags["temp"] = "yellow"
+            health["dc_current"] = "grey"
+
+        # AC Power LED
+        ac_col = f"Potenza AC (INV {inv_id}) [W]"
+        ac_val = None
+        if ac_row is not None and ac_col in ac_row.index:
+            ac_val = ac_row[ac_col]
+
+        if ac_val is None or pd.isna(ac_val):
+            health["ac_power"] = "grey"
+        elif ac_val > AC_HEALTHY_MIN:
+            health["ac_power"] = "green"
+        elif ac_val > 1000:
+            health["ac_power"] = "yellow"
+        elif ac_val > 0:
+            health["ac_power"] = "red"
+        else:
+            # 0 W - depends on time of day
+            if DAYLIGHT_START <= ora <= DAYLIGHT_END:
+                health["ac_power"] = "red"  # Should be generating
             else:
-                flags["temp"] = "red"
+                health["ac_power"] = "grey"  # Off-hours is OK
 
-        # 3. DC Current Variance (relative to site median) ────────────────────
-        inv_dc = inv_dc_means.get(inv, np.nan)
-        if pd.isna(inv_dc) or pd.isna(site_dc_median) or site_dc_median <= 0:
-            flags["dc_current"] = "grey"          # Night or no DC data — bypass
+        # Overall = worst of 4 LEDs
+        scores = []
+        score_map = {"green": 0, "yellow": 1, "red": 2, "grey": -1}
+        for k in ["pr", "temp", "dc_current", "ac_power"]:
+            score = score_map.get(health[k], -1)
+            if score >= 0:
+                scores.append(score)
+
+        if not scores:
+            health["overall_status"] = "grey"
         else:
-            # Red if inverter DC drops below 15 % of the site median
-            flags["dc_current"] = "red" if inv_dc < site_dc_median * 0.15 else "green"
+            worst = max(scores)
+            health["overall_status"] = ["green", "yellow", "red"][worst]
 
-        # 4. AC Power Variance (relative to site median) ──────────────────────
-        ac_raw = latest.get(inv, np.nan)
-        if pd.isna(ac_raw) or pd.isna(site_ac_median) or site_ac_median <= 0:
-            flags["ac_power"] = "grey"            # Night or no AC data — bypass
-        else:
-            # Red if inverter AC is more than 3 % below the site median
-            flags["ac_power"] = "red" if float(ac_raw) < site_ac_median * 0.97 else "green"
+        inverter_health[inv_label] = health
 
-        # Overall: worst non-grey flag wins; "grey" only when every flag is grey
-        worst = max(flags.values(), key=lambda s: COLOR_RANK.get(s, -1))
-        flags["overall_status"] = worst if worst != "grey" else "grey"
-
-        health[inv] = flags
-
-    logger.info(f"Health flags computed for {len(health)} inverters.")
-    return health
+    return inverter_health
 
 
-def analyze_site(directory):
-    logger.info("Starting forensic analysis of plant data...")
-    
-    # 1. Load latest files and track status
-    file_patterns = {
-        'Potenza_AC': "*Potenza_AC_*.xlsx",
-        'PR': "*PR_*.xlsx",
-        'Resistenza_Isolamento': "*Resistenza_Isolamento_*.xlsx",
-        'Temperatura': "*Temperatura_*.xlsx",
-        'Corrente_DC': "*Corrente_DC_*.xlsx",
-        'Irraggiamento': "*Irraggiamento_*.xlsx"
+# ---------------------------------------------------------------------------
+# Macro Health
+# ---------------------------------------------------------------------------
+
+def compute_macro_health(inverter_health: dict) -> dict:
+    """Compute plant-wide health summary."""
+    total = len(inverter_health)
+    online = sum(1 for h in inverter_health.values() if h["ac_power"] in ["green", "yellow"])
+    tripped = sum(1 for h in inverter_health.values() if h["ac_power"] == "red")
+    comms_lost = sum(1 for h in inverter_health.values() if h["ac_power"] == "grey")
+
+    return {
+        "total_inverters": total,
+        "online": online,
+        "tripped": tripped,
+        "comms_lost": comms_lost,
+        "last_sync": datetime.now().isoformat(timespec="seconds"),
     }
 
-    file_paths = {}
-    file_statuses = {}
-    dataframes = {k: pd.DataFrame() for k in file_patterns.keys()}
 
-    for key, pattern in file_patterns.items():
-        matches = glob.glob(os.path.join(directory, pattern))
-        if matches:
-            file_paths[key] = max(matches, key=os.path.getmtime)
-            try:
-                dataframes[key] = clean_data(pd.read_excel(file_paths[key]))
-                file_statuses[key] = {"status": "success", "timestamp": datetime.fromtimestamp(os.path.getmtime(file_paths[key])).strftime('%H:%M')}
-            except Exception as e:
-                logger.error(f"Error reading Excel file {key}: {e}")
-                file_statuses[key] = {"status": "pending", "data": None}
-        else:
-            file_statuses[key] = {"status": "pending", "data": None}
+# ---------------------------------------------------------------------------
+# Main Analysis
+# ---------------------------------------------------------------------------
 
-    # 3. Standardize Time and Merge (if at least Potenza_AC exists)
-    pot_df = dataframes['Potenza_AC']
-    if pot_df.empty:
-        logger.warning("Potenza_AC missing. Cannot perform full analysis.")
-        # Proceed with empty analysis structure
-        dashboard_data = {
-            "macro_health": {"total_inverters": 0, "online": 0, "tripped": 0, "comms_lost": 0},
-            "anomalies": [],
-            "file_statuses": file_statuses,
-            "inverter_health": {}
-        }
-    else:
-        # Standardize timestamps for all available dataframes
-        for k, df in dataframes.items():
-            if not df.empty and 'Ora' in df.columns:
-                if pd.api.types.is_datetime64_any_dtype(df['Ora']):
-                    df['Ora'] = df['Ora'].dt.strftime('%H:%M')
-                df['Ora_Numeric'] = df['Ora'].apply(to_hours)
-
-        # Master merge on 'Ora' using Potenza_AC as reference
-        merged = pot_df[['Ora', 'Ora_Numeric']].copy()
-        inv_ids = [c for c in pot_df.columns if 'INV' in c and 'Ora' not in c]
-        
-        # Merge available datasets
-        suffix_map = {
-            'Resistenza_Isolamento': '_RES', 
-            'Temperatura': '_TEMP', 
-            'Corrente_DC': '_DC',
-            'PR': '_PR'
-        }
-        for key in suffix_map.keys():
-            df = dataframes[key]
-            if not df.empty:
-                cols_to_merge = [c for c in df.columns if 'INV' in c] + ['Ora']
-                merged = merged.merge(df[cols_to_merge], on='Ora', how='left', suffixes=('', suffix_map[key]))
-
-        # Handle Irradiance separately
-        irr_df = dataframes['Irraggiamento']
-        if not irr_df.empty:
-            irr_cols = [c for c in irr_df.columns if c != 'Ora' and c != 'Ora_Numeric']
-            merged = merged.merge(irr_df[irr_cols + ['Ora']], on='Ora', how='left')
-
-        # --- FULL FORENSIC SCAN (Incident Detective) ---
-        all_incidents = []
-        
-        # Calculate Site-wide Production (Median is more robust to outliers)
-        active_production = merged[[c for c in merged.columns if (c in inv_ids or '_POT' in c)]]
-        site_production = active_production.median(axis=1) if not pot_df.empty else pd.Series([0]*len(merged))
-        
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        total_invs = len(inv_ids)
-
-        for idx, inv in enumerate(inv_ids):
-            logger.info(f"Scanning Inverter {idx+1}/{total_invs}: {inv}...")
-            pot = merged[inv] if inv in merged.columns else merged.get(f"{inv}_POT", pd.Series([np.nan]*len(merged)))
-            res = merged.get(f"{inv}_RES", pd.Series([np.nan]*len(merged)))
-            temp = merged.get(f"{inv}_TEMP", pd.Series([np.nan]*len(merged)))
-            pr_data = merged.get(f"{inv}_PR", pd.Series([np.nan]*len(merged)))
-            
-            # Pre-calculate DC columns for this inverter
-            dc_cols = [c for c in merged.columns if (inv in c and '_DC' in c)]
-            # If we have DC strings, get their values as a matrix for fast access
-            dc_matrix = merged[dc_cols].values if dc_cols else np.array([[]]*len(merged))
-            
-            # Detect Events throughout the entire dataframe
-            # Using zip avoids the heavy overhead of iloc[i] in a tight loop
-            for i, (row_time, row_h, p_val, r_val, t_val, pr_val, s_prod, dc_vals) in enumerate(zip(
-                merged['Ora'], merged['Ora_Numeric'], pot, res, temp, pr_data, site_production, dc_matrix
-            )):
-                
-                incident = None
-
-                # Rule 1: Performance Ratio < 85% (Error)
-                if not pd.isna(pr_val) and (pr_val < 0.85 or (pr_val < 85 and pr_val > 1)) and row_h >= 9 and row_h <= 17:
-                    display_pr = pr_val if pr_val < 100 else pr_val/100
-                    incident = {"type": "Low Performance Ratio", "severity": "Critical", "details": f"PR: {round(display_pr, 2)}%"}
-
-                # Rule 2: Inverter Temperature > 40°C (Warning)
-                elif not pd.isna(t_val) and t_val > 40:
-                    incident = {"type": "High Operating Temp", "severity": "Warning", "details": f"Measured: {t_val}°C"}
-
-                # Rule 3: Low DC current in any string (Error)
-                elif dc_cols and p_val > 500: # only check if inverter is producing
-                    for col_idx, dcv in enumerate(dc_vals):
-                        if not pd.isna(dcv) and dcv < 0.2: # Simple threshold for "low" DC current
-                            incident = {"type": "DC String Failure", "severity": "Critical", "details": f"Low current on {dc_cols[col_idx]}"}
-                            break
-
-                # Rule 4: AC Power difference > 3% (Error)
-                if not incident and s_prod > 5000: # Site is producing significantly
-                    p_diff = abs(p_val - s_prod) / s_prod if s_prod > 0 else 0
-                    if p_diff > 0.03:
-                        incident = {"type": "Power Yield Deviation", "severity": "Critical", "details": f"Deviation: {round(p_diff*100,1)}% from site avg"}
-
-                # Generic System rules (Comm/Trip)
-                if not incident:
-                    if pd.isna(p_val) and row_h >= 7 and row_h <= 19:
-                        incident = {"type": "Communication Problem", "severity": "High", "details": "No data stream."}
-                    elif p_val == 0 and s_prod > 2000 and row_h >= 7 and row_h <= 19:
-                        incident = {"type": "Inverter Trip", "severity": "Critical", "details": "Zero production detected."}
-
-                if incident:
-                    # Append unique incidents
-                    incident.update({"timestamp": f"{today_str} {row_time}", "inverter": inv})
-                    all_incidents.append(incident)
-
-        # De-duplicate: If the same inverter has the same error type for consecutive time slots,
-        # we only keep the first one to avoid alert fatigue.
-        unique_anomalies = []
-        if all_incidents:
-            all_incidents.sort(key=lambda x: (x['inverter'], x['type'], x['timestamp']))
-            unique_anomalies.append(all_incidents[0])
-            for k in range(1, len(all_incidents)):
-                # If it's a different inverter or different problem, it's unique
-                if (all_incidents[k]['inverter'] != all_incidents[k-1]['inverter'] or 
-                    all_incidents[k]['type'] != all_incidents[k-1]['type']):
-                    unique_anomalies.append(all_incidents[k])
-                else:
-                    # If same inverter and type, check time gap (Simplified: keep only if gap > 1 hour)
-                    try:
-                        t1 = datetime.strptime(all_incidents[k-1]['timestamp'], '%Y-%m-%d %H:%M')
-                        t2 = datetime.strptime(all_incidents[k]['timestamp'], '%Y-%m-%d %H:%M')
-                        if (t2 - t1).total_seconds() > 3600:
-                            unique_anomalies.append(all_incidents[k])
-                    except: pass
-
-        dashboard_data = {
-            "macro_health": {"total_inverters": len(inv_ids), "online": 0, "tripped": 0, "comms_lost": 0},
-            "anomalies": unique_anomalies[-50:],
-            "file_statuses": file_statuses,
-            "inverter_health": compute_health_flags(merged, inv_ids)
-        }
-        dashboard_data["macro_health"]["online"] = int((pot_df.iloc[-1][inv_ids] > 0).sum()) if not pot_df.empty else 0
-        dashboard_data["macro_health"]["tripped"] = int((pot_df.iloc[-1][inv_ids] == 0).sum()) if not pot_df.empty else 0
-        dashboard_data["macro_health"]["comms_lost"] = int(pot_df.iloc[-1][inv_ids].isna().sum()) if not pot_df.empty else 0
-
-    # --- SAVE TIME-SERIES DAILY JSON ---
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    daily_json_path = os.path.join(directory, f"dashboard_data_{today_str}.json")
-    
-    current_time_key = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    time_series_data = {}
-
-    if os.path.exists(daily_json_path):
-        try:
-            with open(daily_json_path, 'r') as f:
-                time_series_data = json.load(f)
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"Corrupted JSON detected in {daily_json_path}. Creating new file. Error: {e}")
-            time_series_data = {}
-
-    time_series_data[current_time_key] = dashboard_data
-
-    # Save back
+def analyze_site(date_str: str) -> None:
+    """Main analysis: load data, compute health, write JSON."""
     try:
-        with open(daily_json_path, 'w') as f:
-            json.dump(time_series_data, f, indent=4)
-        logger.info(f"Analysis saved to daily JSON: {daily_json_path}")
+        logger.info(f"Starting analysis for {date_str}...")
+
+        # Load metrics
+        logger.info("Loading metrics...")
+        ac_df = load_metric(date_str, "Potenza_AC")
+        pr_df = load_metric(date_str, "PR")
+        temp_df = load_metric(date_str, "Temperatura")
+        dc_df = load_metric(date_str, "Corrente_DC")
+        resist_df = load_metric(date_str, "Resistenza_Isolamento")
+        irrad_df = load_metric(date_str, "Irraggiamento")
+
+        if ac_df is None:
+            logger.warning(f"Potenza_AC not found for {date_str}")
+            return
+
+        # Compute health from latest values
+        logger.info("Computing health flags...")
+        inverter_health = compute_latest_health(date_str, ac_df, temp_df, dc_df, pr_df)
+        macro_health = compute_macro_health(inverter_health)
+
+        # Build JSON snapshot
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        snapshot = {
+            timestamp: {
+                "macro_health": macro_health,
+                "inverter_health": inverter_health,
+                "active_anomalies": [],  # Placeholder for future anomaly detection
+            }
+        }
+
+        # Write JSON
+        json_path = DATA_DIR / f"dashboard_data_{date_str}.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+        logger.info(f"Wrote JSON: {json_path}")
+
+        # Log summary
+        logger.info(f"Health: {macro_health['online']} online, {macro_health['tripped']} tripped, "
+                   f"{macro_health['comms_lost']} comms_lost")
+
     except Exception as e:
-        logger.error(f"Failed to write JSON: {e}")
+        logger.error(f"Analysis failed: {e}", exc_info=True)
 
-    cleanup_old_daily_jsons(directory)
 
-class VCOMHandler(FileSystemEventHandler):
-    def __init__(self, directory):
-        self.directory = directory
-        self.last_run = 0
+# ---------------------------------------------------------------------------
+# File Watcher
+# ---------------------------------------------------------------------------
+
+class MetricFileHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        if event.is_directory or not event.src_path.endswith(".xlsx"):
+            return
+        time.sleep(2)
+        self._check_and_analyze()
 
     def on_modified(self, event):
-        if event.src_path.endswith('.xlsx'):
-            if time.time() - self.last_run > 30:
-                self.last_run = time.time()
-                time.sleep(5)
-                analyze_site(self.directory)
+        if event.is_directory or not event.src_path.endswith(".xlsx"):
+            return
+        self._check_and_analyze()
 
-if __name__ == "__main__":
-    target_dir = "./extracted_data"
-    os.makedirs(target_dir, exist_ok=True)
-    
-    logger.info(f"Watchdog active on {target_dir}")
-    event_handler = VCOMHandler(target_dir)
+    def _check_and_analyze(self):
+        today = datetime.now().strftime("%Y-%m-%d")
+        required = [
+            f"PR_{today}.xlsx",
+            f"Potenza_AC_{today}.xlsx",
+            f"Corrente_DC_{today}.xlsx",
+            f"Resistenza_Isolamento_{today}.xlsx",
+            f"Temperatura_{today}.xlsx",
+            f"Irraggiamento_{today}.xlsx",
+        ]
+
+        present = [f for f in required if (DATA_DIR / f).exists()]
+        if len(present) == len(required):
+            logger.info(f"Complete set for {today}. Analyzing...")
+            analyze_site(today)
+
+
+def main():
+    logger.info("Starting VCOM Watchdog (Final)...")
+    logger.info(f"Monitoring: {DATA_DIR}")
+
+    handler = MetricFileHandler()
     observer = Observer()
-    observer.schedule(event_handler, target_dir, recursive=False)
+    observer.schedule(handler, str(DATA_DIR), recursive=False)
     observer.start()
 
     try:
         while True:
-            time.sleep(10)
+            time.sleep(1)
     except KeyboardInterrupt:
+        logger.info("Shutting down...")
         observer.stop()
     observer.join()
+
+
+if __name__ == "__main__":
+    main()

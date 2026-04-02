@@ -1,46 +1,115 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-import os
+"""
+dashboard/app.py — FastAPI dashboard server for Mazara SCADA monitoring.
+
+Routes:
+  GET /           → serves static/index.html
+  GET /api/status → returns the latest snapshot from dashboard_data_{today}.json
+
+Run with:
+    python dashboard/app.py
+    (or via uvicorn: uvicorn dashboard.app:app --host localhost --port 8080)
+"""
+
 import json
-import uvicorn
+import sys
 from datetime import datetime
+from pathlib import Path
 
+# Add parent to sys.path so we can import analyze_site
+DASHBOARD_DIR = Path(__file__).resolve().parent
+ROOT = DASHBOARD_DIR.parent
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+# Import analysis logic
+from processor_watchdog import analyze_site
+
+# ---------------------------------------------------------------------------
 # Paths
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_ROOT_DIR = os.path.dirname(_SCRIPT_DIR)
-_DATA_PATH = os.path.join(_ROOT_DIR, "extracted_data", "dashboard_data.json")
+# ---------------------------------------------------------------------------
+DASHBOARD_DIR = Path(__file__).resolve().parent
+STATIC_DIR = DASHBOARD_DIR / "static"
+ROOT = DASHBOARD_DIR.parent
+DATA_DIR = ROOT / "extracted_data"
 
-app = FastAPI(title="Mazara Monitoring Dashboard")
+STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-# Serve static files
-static_path = os.path.join(_SCRIPT_DIR, "static")
-if not os.path.exists(static_path):
-    os.makedirs(static_path)
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+app = FastAPI(title="Mazara SCADA Monitor", docs_url=None, redoc_url=None)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-@app.get("/api/status")
-async def get_status():
-    """Returns the latest plant health data from the daily time-series JSON file."""
-    today_str = datetime.now().strftime('%Y-%m-%d')
-    daily_data_path = os.path.join(_ROOT_DIR, "extracted_data", f"dashboard_data_{today_str}.json")
-
-    if not os.path.exists(daily_data_path):
-        # Return empty structure if no data for today yet
-        return {}
-    
-    try:
-        with open(daily_data_path, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
-async def read_index():
-    return FileResponse(os.path.join(static_path, "index.html"))
+async def index():
+    return FileResponse(str(STATIC_DIR / "index.html"))
 
-# Mount static directory for JS/CSS
-app.mount("/static", StaticFiles(directory=static_path), name="static")
 
+@app.get("/api/status")
+async def status():
+    today = datetime.now().strftime("%Y-%m-%d")
+    json_path = DATA_DIR / f"dashboard_data_{today}.json"
+
+    if not json_path.exists():
+        return JSONResponse({})
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return JSONResponse({})
+
+    if not data:
+        return JSONResponse({})
+
+    # Return the most recent snapshot
+    latest_key = sorted(data.keys())[-1]
+    return JSONResponse(data[latest_key])
+
+
+@app.post("/api/forensic/rescan")
+async def rescan():
+    """Delete current today's JSON, clear error folders, and re-trigger analyze_site."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    json_path = DATA_DIR / f"dashboard_data_{today}.json"
+    root_errors = ROOT / "errors"
+    vcom_screenshots = ROOT / "VCOM_Screenshots"
+
+    try:
+        # 1. Delete JSON if exists to force a fresh start
+        if json_path.exists():
+            json_path.unlink()
+        
+        # 2. Clear error screenshots
+        for folder in [root_errors, vcom_screenshots]:
+            if folder.exists():
+                for f in folder.glob("*.png"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+
+        # 3. Run analysis
+        analyze_site(today)
+        
+        return JSONResponse({"status": "success", "message": f"Rescan completed for {today}. Errors cleared."})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Bind to 0.0.0.0:8080 as requested to allow local network access
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(
+        app,
+        host="localhost",
+        port=8080,
+        log_level="info",
+    )

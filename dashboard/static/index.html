@@ -1,120 +1,149 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mazara Monitoring - Plant Health</title>
-    <link rel="stylesheet" href="static/style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mazara SCADA Monitor</title>
+  <link rel="stylesheet" href="/static/style.css" />
 </head>
-<body class="dark-mode">
-    <div class="container">
-        <header>
-            <div class="header-left">
-                <h1>☀️ Plant Health Monitoring</h1>
-                <p class="subtitle">Solar Plant Performance & Diagnostics</p>
-            </div>
-            <div class="header-right">
-                <span id="last-sync" class="status-badge">Last Sync: --:--:--</span>
-            </div>
-        </header>
+<body>
 
-        <section class="metrics-grid">
-            <div class="metric-card card-total">
-                <span class="label">Total Inverters</span>
-                <span id="total-inv" class="value">0</span>
-            </div>
-            <div class="metric-card card-online">
-                <span class="label">Online & Producing</span>
-                <span id="online-inv" class="value">0</span>
-            </div>
-            <div class="metric-card card-tripped">
-                <span class="label">Tripped (0W)</span>
-                <span id="tripped-inv" class="value">0</span>
-            </div>
-            <div class="metric-card card-comms">
-                <span class="label">Comms Lost</span>
-                <span id="comms-lost" class="value">0</span>
-            </div>
-        </section>
-        
-        <section class="ingestion-section">
-            <h2>Data Ingestion Status</h2>
-            <div id="file-status-grid" class="file-grid">
-                <div class="file-card" id="file-Potenza_AC">
-                    <span class="file-label">Potenza AC</span>
-                    <span class="file-indicator loading"></span>
-                    <span class="file-status-text"></span>
-                </div>
-                <div class="file-card" id="file-PR">
-                    <span class="file-label">PR</span>
-                    <span class="file-indicator loading"></span>
-                    <span class="file-status-text"></span>
-                </div>
-                <div class="file-card" id="file-Resistenza_Isolamento">
-                    <span class="file-label">Insulation</span>
-                    <span class="file-indicator loading"></span>
-                    <span class="file-status-text"></span>
-                </div>
-                <div class="file-card" id="file-Temperatura">
-                    <span class="file-label">Temperature</span>
-                    <span class="file-indicator loading"></span>
-                    <span class="file-status-text"></span>
-                </div>
-                <div class="file-card" id="file-Corrente_DC">
-                    <span class="file-label">Corrente DC</span>
-                    <span class="file-indicator loading"></span>
-                    <span class="file-status-text"></span>
-                </div>
-                <div class="file-card" id="file-Irraggiamento">
-                    <span class="file-label">Irraggiamento</span>
-                    <span class="file-indicator loading"></span>
-                    <span class="file-status-text"></span>
-                </div>
-            </div>
-        </section>
+<!-- ═══════════════════════════════════════════════════════════
+     Header
+════════════════════════════════════════════════════════════ -->
+<header>
+  <div>
+    <h1>Mazara Solar Plant — SCADA Monitor</h1>
+    <div class="subtitle">System ID 2144635 &nbsp;·&nbsp; Mazara del Vallo, Sicily &nbsp;·&nbsp; 36 Inverters · 808 Strings</div>
+  </div>
+  <div class="header-actions">
+    <div id="last-updated" style="color:var(--muted);font-size:0.75rem;">Connecting…</div>
+    <button id="rescan-btn" class="btn-rescan">FORENSIC RE-SCAN</button>
+  </div>
+</header>
 
-        <section class="health-matrix-section">
-            <h2>Inverter Health Matrix</h2>
-            <div class="health-matrix-legend">
-                <span class="legend-item"><span class="led-dot green"></span> OK</span>
-                <span class="legend-item"><span class="led-dot yellow"></span> Warning</span>
-                <span class="legend-item"><span class="led-dot red"></span> Alert</span>
-                <span class="legend-item"><span class="led-dot grey"></span> No Data</span>
-                <span class="legend-item legend-labels">PR &nbsp;·&nbsp; Temp &nbsp;·&nbsp; DC &nbsp;·&nbsp; AC</span>
-            </div>
-            <div id="inverter-health-grid" class="inverter-grid">
-                <p class="placeholder-text">Waiting for data updates...</p>
-            </div>
-        </section>
+<main>
 
-        <section class="anomalies-section">
-            <h2>Active Diagnostic Alerts</h2>
-            <div id="alerts-container" class="alerts-grid">
-                <!-- Alerts populated by JS -->
-                <p class="placeholder-text">Waiting for data updates...</p>
-            </div>
-        </section>
+  <!-- ══════════════════════════════════════════════════════════
+       1. Macro Health
+  ═══════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Plant Overview</h2>
+    <div id="metrics-grid">
 
-        <section class="history-section">
-            <h2>Historical Alarm Trail</h2>
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Inverter</th>
-                            <th>Type</th>
-                            <th>Severity</th>
-                            <th>Details</th>
-                        </tr>
-                    </thead>
-                    <tbody id="history-body">
-                        <!-- History populated by JS -->
-                    </tbody>
-                </table>
-            </div>
-        </section>
+      <div class="card metric-card">
+        <div class="metric-value" id="val-total">36</div>
+        <div class="metric-label">Total Inverters</div>
+      </div>
+
+      <div class="card metric-card online">
+        <div class="metric-value" id="val-online">—</div>
+        <div class="metric-label">Online</div>
+      </div>
+
+      <div class="card metric-card tripped">
+        <div class="metric-value" id="val-tripped">—</div>
+        <div class="metric-label">Tripped</div>
+      </div>
+
+      <div class="card metric-card comms">
+        <div class="metric-value" id="val-comms">—</div>
+        <div class="metric-label">Comms Lost</div>
+      </div>
+
     </div>
-    <script src="static/app.js"></script>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════════
+       2. Data Ingestion Status
+  ═══════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Data Ingestion Status</h2>
+    <div id="ingestion-grid">
+      <!-- Populated by app.js -->
+      <div class="card file-card loading">
+        <span class="file-name">PR Inverter</span>
+        <span class="file-status"><span class="spinner"></span>loading</span>
+        <span class="file-time">—</span>
+      </div>
+      <div class="card file-card loading">
+        <span class="file-name">Potenza AC</span>
+        <span class="file-status"><span class="spinner"></span>loading</span>
+        <span class="file-time">—</span>
+      </div>
+      <div class="card file-card loading">
+        <span class="file-name">Corrente DC</span>
+        <span class="file-status"><span class="spinner"></span>loading</span>
+        <span class="file-time">—</span>
+      </div>
+      <div class="card file-card loading">
+        <span class="file-name">Resistenza Isol.</span>
+        <span class="file-status"><span class="spinner"></span>loading</span>
+        <span class="file-time">—</span>
+      </div>
+      <div class="card file-card loading">
+        <span class="file-name">Temperatura</span>
+        <span class="file-status"><span class="spinner"></span>loading</span>
+        <span class="file-time">—</span>
+      </div>
+      <div class="card file-card loading">
+        <span class="file-name">Irraggiamento</span>
+        <span class="file-status"><span class="spinner"></span>loading</span>
+        <span class="file-time">—</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════════
+       3. Inverter Health Matrix
+  ═══════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Inverter Health Matrix
+      <span style="font-size:0.65rem;font-weight:400;color:var(--muted);margin-left:0.75rem;">
+        LED: PR &nbsp;|&nbsp; Temp &nbsp;|&nbsp; DC &nbsp;|&nbsp; AC
+      </span>
+    </h2>
+    <div id="inverter-grid">
+      <!-- Populated by app.js -->
+      <div class="empty-state" style="grid-column:1/-1;">Waiting for first data cycle…</div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════════
+       4. Active Diagnostic Alerts
+  ═══════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Active Diagnostic Alerts</h2>
+    <div id="alerts-container" class="alert-list">
+      <div class="empty-state">No active alerts — waiting for data…</div>
+    </div>
+  </section>
+
+  <!-- ══════════════════════════════════════════════════════════
+       5. Historical Alarm Trail
+  ═══════════════════════════════════════════════════════════ -->
+  <section>
+    <h2>Historical Alarm Trail <span style="font-size:0.65rem;font-weight:400;color:var(--muted);">(newest first · today · max 100)</span></h2>
+    <div class="alarm-table-wrapper">
+      <table class="alarm-table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Inverter</th>
+            <th>Event Type</th>
+            <th>Severity</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody id="history-tbody">
+          <tr><td colspan="5" class="empty-state">No historical data yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script src="/static/app.js"></script>
 </body>
 </html>
